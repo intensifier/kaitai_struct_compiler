@@ -14,6 +14,7 @@ object KSError {
   def fromName(name: String): KSError = name match {
     case "EndOfStreamError" => EndOfStreamError
     case "UndecidedEndiannessError" => UndecidedEndiannessError
+    case "ConversionError" => ConversionError
     case RE_EXCEPTION_WITH_TYPE(excName, dataTypeStr) =>
       val dataType = DataType.pureFromString(dataTypeStr)
       val excClass = excName match {
@@ -21,6 +22,7 @@ object KSError {
         case "ValidationLessThanError" => ValidationLessThanError
         case "ValidationGreaterThanError" => ValidationGreaterThanError
         case "ValidationNotAnyOfError" => ValidationNotAnyOfError
+        case "ValidationNotInEnumError" => ValidationNotInEnumError
         case "ValidationExprError" => ValidationExprError
       }
       excClass(dataType)
@@ -66,6 +68,14 @@ case class ValidationNotAnyOfError(_dt: DataType) extends ValidationError(_dt) {
 }
 
 /**
+  * Error to be thrown when validation fails with actual not being in the enum.
+  * @param _dt data type used in validation process
+  */
+case class ValidationNotInEnumError(_dt: DataType) extends ValidationError(_dt) {
+  def name = "ValidationNotInEnumError"
+}
+
+/**
   * Error to be thrown when validation fails with actual not matching the custom
   * validation expression.
   * @param _dt data type used in validation process
@@ -88,4 +98,12 @@ case object UndecidedEndiannessError extends KSError {
   */
 case object EndOfStreamError extends KSError {
   def name = "EndOfStreamError"
+}
+
+/**
+ * Exception that maps to real target language exceptions resulting from invalid string-to-number
+ * conversions.
+ */
+case object ConversionError extends KSError {
+  def name = "ConversionError"
 }

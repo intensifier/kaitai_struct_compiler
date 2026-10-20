@@ -19,7 +19,7 @@ class ClassCompiler(
 
   override def compile: CompileLog.SpecSuccess = {
     lang.fileHeader(topClassName.head)
-    compileOpaqueClasses(topClass)
+    compileExternalTypes(topClass)
     compileClass(topClass)
     lang.fileFooter(topClassName.head)
 
@@ -29,21 +29,18 @@ class ClassCompiler(
     )
   }
 
-  def compileOpaqueClasses(topClass: ClassSpec) = {
-    TypeProcessor.getOpaqueClasses(topClass).foreach((classSpec) =>
-      if (classSpec != topClass)
-        lang.opaqueClassDeclaration(classSpec)
+  def compileExternalTypes(topClass: ClassSpec) = {
+    TypeProcessor.getExternalTypes(topClass).foreach((extType) =>
+      lang.externalTypeDeclaration(extType)
     )
   }
 
   /**
-    * Generates code for one full class using a given [[ClassSpec]].
+    * Generates code for one full class using a given [[format.ClassSpec]].
     * @param curClass current class to generate code for
     */
   def compileClass(curClass: ClassSpec): Unit = {
     provider.nowClass = curClass
-
-    curClass.meta.imports.foreach(file => lang.importFile(file))
 
     if (!lang.innerDocstrings)
       compileClassDoc(curClass)
@@ -54,20 +51,14 @@ class ClassCompiler(
     // Forward declarations for recursive types
     curClass.types.foreach { case (typeName, _) => lang.classForwardDeclaration(List(typeName)) }
 
-    // Forward declarations for params which reference types external to this type
-    curClass.params.foreach((paramDefSpec) =>
-      paramDefSpec.dataType match {
-        case ut: UserType =>
-          val externalTypeName = ut.classSpec.get.name
-          if (externalTypeName.head != curClass.name.head) {
-            lang.classForwardDeclaration(externalTypeName)
-          }
-        case _ => // no forward declarations needed
-      }
-    )
-
     if (lang.innerEnums)
       compileEnums(curClass)
+
+    val parsedAttrs = curClass.seq ++ curClass.instances.values.collect {
+      case inst: AttrLikeSpec => inst
+    }
+
+    compileSwitchTaggedUnions(parsedAttrs)
 
     if (lang.config.readStoresPos)
       lang.debugClassSequence(curClass.seq)
@@ -77,6 +68,13 @@ class ClassCompiler(
 
     // Read method(s)
     compileEagerRead(curClass.seq, curClass.meta.endian)
+
+    compileFetchInstancesProc(parsedAttrs)
+
+    if (config.readWrite) {
+      compileWrite(curClass.seq, curClass.instances, curClass.meta.endian)
+      compileCheck(curClass.seq, curClass.instances)
+    }
 
     // Destructor
     compileDestructor(curClass)
@@ -95,12 +93,16 @@ class ClassCompiler(
       curClass.seq ++
       curClass.params ++
       List(
-        AttrSpec(List(), RootIdentifier, CalcUserType(topClassName, None)),
+        AttrSpec(List(), RootIdentifier, topClass.toDataType),
         AttrSpec(List(), ParentIdentifier, curClass.parentType)
       ) ++
       ExtraAttrs.forClassSpec(curClass, lang)
-    compileAttrDeclarations(allAttrs)
     compileAttrReaders(allAttrs)
+
+    // NOTE: most target languages don't care, but Zig requires all fields to be
+    // declared together, see https://github.com/ziglang/zig/issues/5077
+    compileInstanceDeclarations(curClass)
+    compileAttrDeclarations(allAttrs)
 
     curClass.toStringExpr.foreach(expr => lang.classToString(expr))
 
@@ -132,6 +134,15 @@ class ClassCompiler(
     )
     compileInit(curClass)
     curClass.instances.foreach { case (instName, _) => lang.instanceClear(instName) }
+    if (config.readWrite) {
+      curClass.instances.foreach { case (instName, instSpec) =>
+        instSpec match {
+          case _: ParseInstanceSpec =>
+            lang.instanceWriteFlagInit(instName)
+          case _: ValueInstanceSpec => // do nothing
+        }
+      }
+    }
     if (lang.config.autoRead)
       lang.runRead(curClass.name)
     lang.classConstructorFooter
@@ -217,6 +228,9 @@ class ClassCompiler(
         attr.isNullable
       }
       lang.attributeReader(attr.id, attr.dataTypeComposite, isNullable)
+      if (config.readWrite) {
+        lang.attributeSetter(attr.id, attr.dataTypeComposite, isNullable)
+      }
     }
   }
 
@@ -236,23 +250,44 @@ class ClassCompiler(
   def compileEagerRead(seq: List[AttrSpec], endian: Option[Endianness]): Unit = {
     endian match {
       case None | Some(_: FixedEndian) =>
-        compileSeqProc(seq, None)
+        compileSeqReadProc(seq, None)
       case Some(ce: CalcEndian) =>
         lang.readHeader(None, false)
         compileCalcEndian(ce)
         lang.runReadCalc()
         lang.readFooter()
 
-        compileSeqProc(seq, Some(LittleEndian))
-        compileSeqProc(seq, Some(BigEndian))
+        compileSeqReadProc(seq, Some(LittleEndian))
+        compileSeqReadProc(seq, Some(BigEndian))
       case Some(InheritedEndian) =>
         lang.readHeader(None, false)
         lang.runReadCalc()
         lang.readFooter()
 
-        compileSeqProc(seq, Some(LittleEndian))
-        compileSeqProc(seq, Some(BigEndian))
+        compileSeqReadProc(seq, Some(LittleEndian))
+        compileSeqReadProc(seq, Some(BigEndian))
     }
+  }
+
+  def compileWrite(seq: List[AttrSpec], instances: Map[InstanceIdentifier, InstanceSpec], endian: Option[Endianness]): Unit = {
+    endian match {
+      case None | Some(_: FixedEndian) =>
+        compileSeqWriteProc(seq, instances, None)
+      case Some(CalcEndian(_, _)) | Some(InheritedEndian) =>
+        lang.writeHeader(None, false)
+        lang.runWriteCalc()
+        lang.writeFooter()
+
+        compileSeqWriteProc(seq, instances, Some(LittleEndian))
+        compileSeqWriteProc(seq, instances, Some(BigEndian))
+    }
+  }
+
+  def compileCheck(seq: List[AttrSpec], instances: Map[InstanceIdentifier, InstanceSpec]): Unit = {
+    lang.checkHeader()
+    compileSeqCheck(seq)
+    compileInstCheck(instances)
+    lang.checkFooter()
   }
 
   val IS_LE_ID = SpecialIdentifier("_is_le")
@@ -276,10 +311,23 @@ class ClassCompiler(
     * @param seq sequence of attributes
     * @param defEndian default endianness
     */
-  def compileSeqProc(seq: List[AttrSpec], defEndian: Option[FixedEndian]) = {
+  def compileSeqReadProc(seq: List[AttrSpec], defEndian: Option[FixedEndian]) = {
     lang.readHeader(defEndian, seq.isEmpty)
-    compileSeq(seq, defEndian)
+    compileSeqRead(seq, defEndian)
     lang.readFooter()
+  }
+
+  def compileFetchInstancesProc(attrs: List[AttrLikeSpec]) = {
+    lang.fetchInstancesHeader()
+    compileFetchInstances(attrs)
+    lang.fetchInstancesFooter()
+  }
+
+  def compileSeqWriteProc(seq: List[AttrSpec], instances: Map[InstanceIdentifier, InstanceSpec], defEndian: Option[FixedEndian]) = {
+    lang.writeHeader(defEndian, !instances.values.exists(i => i.isInstanceOf[ParseInstanceSpec]) && seq.isEmpty)
+    compileSetInstanceWriteFlags(instances)
+    compileSeqWrite(seq, defEndian)
+    lang.writeFooter()
   }
 
   /**
@@ -287,14 +335,49 @@ class ClassCompiler(
     * @param seq sequence of attributes
     * @param defEndian default endianness
     */
-  def compileSeq(seq: List[AttrSpec], defEndian: Option[FixedEndian]) = {
-    var wasUnaligned = false
+  def compileSeqRead(seq: List[AttrSpec], defEndian: Option[FixedEndian]) = {
     seq.foreach { (attr) =>
-      val nowUnaligned = isUnalignedBits(attr.dataType)
-      if (wasUnaligned && !nowUnaligned)
-        lang.alignToByte(lang.normalIO)
       lang.attrParse(attr, attr.id, defEndian)
-      wasUnaligned = nowUnaligned
+    }
+  }
+
+  def compileFetchInstances(attrs: List[AttrLikeSpec]): Unit = {
+    attrs.foreach { (attr) =>
+      lang.attrFetchInstances(attr, attr.id)
+    }
+  }
+
+  def compileSetInstanceWriteFlags(instances: Map[InstanceIdentifier, InstanceSpec]) = {
+    instances.foreach { case (instName, instSpec) =>
+      instSpec match {
+        case _: ParseInstanceSpec =>
+          lang.instanceSetWriteFlag(instName)
+        case _: ValueInstanceSpec => // do nothing
+      }
+    }
+  }
+
+  def compileSeqWrite(seq: List[AttrSpec], defEndian: Option[FixedEndian]) = {
+    seq.foreach { (attr) =>
+      lang.attrWrite(attr, attr.id, defEndian)
+    }
+  }
+
+  def compileSeqCheck(seq: List[AttrSpec]) = {
+    seq.foreach { (attr) =>
+      lang.attrCheck(attr, attr.id)
+    }
+  }
+
+  def compileInstCheck(instances: Map[InstanceIdentifier, InstanceSpec]) = {
+    instances.foreach { case (instName, instSpec) =>
+      instSpec match {
+        case pi: ParseInstanceSpec =>
+          lang.checkInstanceHeader(instName)
+          lang.attrCheck(pi, instName)
+          lang.checkInstanceFooter()
+        case _: ValueInstanceSpec => // do nothing
+      }
     }
   }
 
@@ -305,6 +388,17 @@ class ClassCompiler(
   def compileEnums(curClass: ClassSpec): Unit =
     curClass.enums.foreach { case(_, enumColl) => compileEnum(curClass, enumColl) }
 
+  def compileSwitchTaggedUnions(attrs: List[AttrLikeSpec]): Unit = {
+    attrs.foreach { (attr) =>
+      attr.dataType match {
+        case st: SwitchType =>
+          if (lang.switchUsesTaggedUnion(st))
+            lang.switchTaggedUnionDeclaration(attr.id, st.cases)
+        case _ => // do nothing
+      }
+    }
+  }
+
   /**
     * Compile subclasses for a given class.
     * @param curClass current type to generate code for
@@ -312,7 +406,13 @@ class ClassCompiler(
   def compileSubclasses(curClass: ClassSpec): Unit =
     curClass.types.foreach { case (_, intClass) => compileClass(intClass) }
 
-  def compileInstances(curClass: ClassSpec) = {
+  def compileInstanceDeclarations(curClass: ClassSpec): Unit = {
+    curClass.instances.foreach { case (instName, instSpec) =>
+      compileInstanceDeclaration(instName, instSpec)
+    }
+  }
+
+  def compileInstances(curClass: ClassSpec): Unit = {
     curClass.instances.foreach { case (instName, instSpec) =>
       compileInstance(curClass.name, instName, instSpec, curClass.meta.endian)
     }
@@ -322,27 +422,50 @@ class ClassCompiler(
     // Determine datatype
     val dataType = instSpec.dataTypeComposite
 
-    compileInstanceDeclaration(instName, instSpec)
-
     if (!lang.innerDocstrings)
       compileInstanceDoc(instName, instSpec)
     lang.instanceHeader(className, instName, dataType, instSpec.isNullable)
     if (lang.innerDocstrings)
       compileInstanceDoc(instName, instSpec)
+    val writingParseInst = config.readWrite && (instSpec match {
+      case _: ParseInstanceSpec =>
+        true
+      case _: ValueInstanceSpec =>
+        false
+    })
+    if (writingParseInst) {
+      lang.instanceCheckWriteFlagAndWrite(instName)
+    }
     lang.instanceCheckCacheAndReturn(instName, dataType)
+    if (writingParseInst) {
+      lang.instanceReturnNullIfDisabled(instName)
+    }
 
+    lang.instanceSetCalculated(instName)
+    lang.instanceTempVarDeclaration(dataType, instSpec.isNullable)
     instSpec match {
       case vi: ValueInstanceSpec =>
-        lang.attrParseIfHeader(instName, vi.ifExpr)
+        lang.attrParseIfHeader(instName, vi.dataTypeComposite, vi.ifExpr)
         lang.instanceCalculate(instName, dataType, vi.value)
         lang.attrParseIfFooter(vi.ifExpr)
-        lang.instanceSetCalculated(instName)
       case pi: ParseInstanceSpec =>
         lang.attrParse(pi, instName, endian)
     }
 
-    lang.instanceReturn(instName, dataType)
+    lang.instanceReturn(instName, dataType, instSpec.isNullable)
     lang.instanceFooter
+
+    if (config.readWrite)
+      instSpec match {
+        case pi: ParseInstanceSpec =>
+          lang.attributeSetter(instName, dataType, instSpec.isNullable)
+          lang.instanceEnabledSetter(instName)
+          lang.writeInstanceHeader(instName)
+          lang.attrWrite(pi, instName, endian)
+          lang.writeInstanceFooter()
+        case _: ValueInstanceSpec =>
+          lang.instanceInvalidate(instName)
+      }
   }
 
   def compileInstanceDeclaration(instName: InstanceIdentifier, instSpec: InstanceSpec): Unit = {
@@ -355,24 +478,23 @@ class ClassCompiler(
       instSpec.isNullable
     }
     lang.instanceDeclaration(instName, instSpec.dataTypeComposite, isNullable)
+    if (config.readWrite)
+      instSpec match {
+        case _: ParseInstanceSpec =>
+          lang.instanceWriteFlagDeclaration(instName)
+        case _: ValueInstanceSpec => // do nothing
+      }
   }
 
   def compileEnum(curClass: ClassSpec, enumColl: EnumSpec): Unit =
-    lang.enumDeclaration(curClass.name, enumColl.name.last, enumColl.sortedSeq)
+    lang.enumDeclaration(curClass.name, enumColl.name.last, enumColl.map.toSeq)
 
-  def isUnalignedBits(dt: DataType): Boolean =
-    dt match {
-      case _: BitsType | _: BitsType1 => true
-      case et: EnumType => isUnalignedBits(et.basedOn)
-      case _ => false
-    }
-
-  def compileClassDoc(curClass: ClassSpec) = {
+  def compileClassDoc(curClass: ClassSpec): Unit = {
     if (!curClass.doc.isEmpty)
       lang.classDoc(curClass.name, curClass.doc)
   }
 
-  def compileInstanceDoc(instName: Identifier, instSpec: InstanceSpec) {
+  def compileInstanceDoc(instName: Identifier, instSpec: InstanceSpec): Unit = {
     if (!instSpec.doc.isEmpty)
       lang.attributeDoc(instName, instSpec.doc)
   }

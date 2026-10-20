@@ -2,7 +2,7 @@ package io.kaitai.struct.languages
 
 import io.kaitai.struct._
 import io.kaitai.struct.datatype.DataType._
-import io.kaitai.struct.datatype.{CalcEndian, DataType, EndOfStreamError, FixedEndian, InheritedEndian, KSError, NeedRaw}
+import io.kaitai.struct.datatype._
 import io.kaitai.struct.exprlang.Ast
 import io.kaitai.struct.exprlang.Ast.expr
 import io.kaitai.struct.format._
@@ -15,15 +15,17 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     with UpperCamelCaseClasses
     with ObjectOrientedLanguage
     with EveryReadIsExpression
+    with FetchInstances
+    with EveryWriteIsExpression
+    with GenericChecks
     with UniversalFooter
     with UniversalDoc
     with AllocateIOLocalVar
-    with FixedContentsUsingArrayByteLiteral
     with SwitchIfOps
     with NoNeedForFullClassPath {
   import JavaCompiler._
 
-  val translator = new JavaTranslator(typeProvider, importList)
+  val translator = new JavaTranslator(typeProvider, importList, config)
 
   // Preprocess fromFileClass and make import
   val fromFileClass = {
@@ -72,18 +74,21 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       ""
     }
 
-    out.puts(s"public ${staticStr}class ${type2class(name)} extends $kstructName {")
+    out.puts(
+      s"public ${staticStr}class ${type2class(name)} " +
+      s"extends ${JavaCompiler.kstructNameFull(config)} {"
+    )
     out.inc
 
     if (config.readStoresPos) {
       out.puts("public Map<String, Integer> _attrStart = new HashMap<String, Integer>();")
       out.puts("public Map<String, Integer> _attrEnd = new HashMap<String, Integer>();")
-      out.puts("public Map<String, ArrayList<Integer>> _arrStart = new HashMap<String, ArrayList<Integer>>();")
-      out.puts("public Map<String, ArrayList<Integer>> _arrEnd = new HashMap<String, ArrayList<Integer>>();")
+      out.puts("public Map<String, List<Integer>> _arrStart = new HashMap<String, List<Integer>>();")
+      out.puts("public Map<String, List<Integer>> _arrEnd = new HashMap<String, List<Integer>>();")
       out.puts
 
-      importList.add("java.util.ArrayList")
       importList.add("java.util.HashMap")
+      importList.add("java.util.List")
       importList.add("java.util.Map")
     }
 
@@ -130,6 +135,14 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       // Normal 3 constructors, chained into the last
 
       val paramsRelay = Utils.join(params.map((p) => paramName(p.id)), ", ", ", ", "")
+
+      if (config.readWrite) {
+        out.puts(s"public ${type2class(name)}(${paramsArg.stripPrefix(", ")}) {")
+        out.inc
+        out.puts(s"this(null, null, null$paramsRelay);")
+        out.dec
+        out.puts("}")
+      }
 
       out.puts
       out.puts(s"public ${type2class(name)}($kstreamName _io$paramsArg) {")
@@ -181,28 +194,116 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts("}")
   }
 
+  override def runWriteCalc(): Unit = {
+    out.puts
+    out.puts("if (_is_le == null) {")
+    out.inc
+    out.puts(s"throw new $kstreamName.UndecidedEndiannessError();")
+    out.dec
+    out.puts("} else if (_is_le) {")
+    out.inc
+    out.puts("_write_SeqLE();")
+    out.dec
+    out.puts("} else {")
+    out.inc
+    out.puts("_write_SeqBE();")
+    out.dec
+    out.puts("}")
+  }
+
   override def readHeader(endian: Option[FixedEndian], isEmpty: Boolean) = {
-    val readAccessAndType = if (!config.autoRead) {
-      "public"
-    } else {
-      "private"
+    endian match {
+      case Some(e) =>
+        out.puts(s"private void _read${Utils.upperUnderscoreCase(e.toSuffix)}() {")
+      case None =>
+        out.puts(s"${if (!config.autoRead) "public" else "private"} void _read() {")
     }
-    val suffix = endian match {
-      case Some(e) => Utils.upperUnderscoreCase(e.toSuffix)
-      case None => ""
-    }
-    out.puts(s"$readAccessAndType void _read$suffix() {")
     out.inc
   }
 
-  override def readFooter(): Unit = universalFooter
+  override def readFooter(): Unit = {
+    if (config.readWrite) {
+      out.puts("_dirty = false;")
+    }
+    universalFooter
+  }
+
+  override def fetchInstancesHeader(): Unit = {
+    out.puts
+    out.puts("public void _fetchInstances() {")
+    out.inc
+  }
+
+  override def fetchInstancesFooter: Unit = universalFooter
+
+  override def attrInvokeFetchInstances(baseExpr: Ast.expr, exprType: DataType, dataType: DataType): Unit = {
+    val expr = castIfNeeded(expression(baseExpr), exprType, dataType)
+    out.puts(s"$expr._fetchInstances();")
+  }
+
+  override def attrInvokeInstance(instName: InstanceIdentifier): Unit = {
+    out.puts(s"${publicMemberName(instName)}();")
+  }
+
+  override def writeHeader(endian: Option[FixedEndian], isEmpty: Boolean): Unit = {
+    out.puts
+    endian match {
+      case Some(e) =>
+        out.puts(s"private void _write_Seq${Utils.upperUnderscoreCase(e.toSuffix)}() {")
+        out.inc
+      case None =>
+        out.puts("public void _write_Seq() {")
+        out.inc
+        out.puts("_assertNotDirty();")
+    }
+  }
+
+  override def checkHeader(): Unit = {
+    out.puts
+    out.puts("public void _check() {")
+    out.inc
+  }
+
+  override def checkFooter(): Unit = {
+    out.puts("_dirty = false;")
+    universalFooter
+  }
+
+  override def writeInstanceHeader(instName: InstanceIdentifier): Unit = {
+    out.puts
+    out.puts(s"private void _write${idToSetterStr(instName)}() {")
+    out.inc
+    instanceClearWriteFlag(instName)
+  }
+
+  override def checkInstanceHeader(instName: InstanceIdentifier): Unit = {
+    out.puts(s"if (_enabled${idToSetterStr(instName)}) {")
+    out.inc
+  }
 
   override def attributeDeclaration(attrName: Identifier, attrType: DataType, isNullable: Boolean): Unit = {
     out.puts(s"private ${kaitaiType2JavaType(attrType, isNullable)} ${idToStr(attrName)};")
   }
 
   override def attributeReader(attrName: Identifier, attrType: DataType, isNullable: Boolean): Unit = {
-    out.puts(s"public ${kaitaiType2JavaType(attrType, isNullable)} ${idToStr(attrName)}() { return ${idToStr(attrName)}; }")
+    val javaType = kaitaiType2JavaType(attrType, isNullable)
+    val name = idToStr(attrName)
+
+    out.puts(s"public $javaType $name() { return $name; }")
+  }
+
+  override def attributeSetter(attrName: Identifier, attrType: DataType, isNullable: Boolean): Unit = {
+    val javaType = kaitaiType2JavaType(attrType, isNullable)
+    val name = idToStr(attrName)
+    val itemType = getArrayItemType(attrType)
+    val typeBasedOnIo = itemType == KaitaiStreamType || itemType == OwnedKaitaiStreamType
+    val setDirtyBit = if (typeBasedOnIo) "" else "_dirty = true; "
+
+    out.puts(s"public void set${idToSetterStr(attrName)}($javaType _v) { $setDirtyBit$name = _v; }")
+  }
+
+  override def attrSetProperty(base: Ast.expr, propName: Identifier, value: String): Unit = {
+    out.puts(s"${expression(base)}.set${idToSetterStr(propName)}($value);")
   }
 
   override def universalDoc(doc: DocSpec): Unit = {
@@ -233,14 +334,10 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts("}")
   }
 
-  override def attrFixedContentsParse(attrName: Identifier, contents: String): Unit = {
-    out.puts(s"${privateMemberName(attrName)} = $normalIO.ensureFixedContents($contents);")
-  }
-
-  override def attrProcess(proc: ProcessExpr, varSrc: Identifier, varDest: Identifier, rep: RepeatSpec): Unit = {
+  override def attrProcess(proc: ProcessExpr, varSrc: Identifier, rep: RepeatSpec): String = {
     val srcExpr = getRawIdExpr(varSrc, rep)
 
-    val expr = proc match {
+    proc match {
       case ProcessXor(xorValue) =>
         val xorValueStr = translator.detectType(xorValue) match {
           case _: IntType => translator.doCast(xorValue, Int1Type(true))
@@ -265,13 +362,66 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
         out.puts(s"$procClass $procName = new $procClass(${args.map(expression).mkString(", ")});")
         s"$procName.decode($srcExpr)"
     }
-    handleAssignment(varDest, expr, rep, false)
+  }
+
+  override def attrUnprocess(proc: ProcessExpr, varSrc: Identifier, varDest: Identifier, rep: RepeatSpec, dataType: BytesType, exprTypeOpt: Option[DataType]): Unit = {
+    val exprType = exprTypeOpt.getOrElse(dataType)
+    val srcExprRaw = expression(Identifier.itemExpr(varSrc, rep))
+    val srcExpr = castIfNeeded(srcExprRaw, exprType, dataType)
+
+    val expr = proc match {
+      case ProcessXor(xorValue) =>
+        val argStr = if (translator.inSubIOWriteBackHandler) "_processXorArg" else expression(xorValue)
+        val xorValueStr = translator.detectType(xorValue) match {
+          case _: IntType => castIfNeeded(argStr, AnyType, Int1Type(true))
+          case _ => argStr
+        }
+        s"$kstreamName.processXor($srcExpr, $xorValueStr)"
+      case ProcessZlib =>
+        s"$kstreamName.unprocessZlib($srcExpr)"
+      case ProcessRotate(isLeft, rotValue) =>
+        val argStr = if (translator.inSubIOWriteBackHandler) "_processRotateArg" else expression(rotValue)
+        val expr = if (!isLeft) {
+          argStr
+        } else {
+          s"8 - ($argStr)"
+        }
+        s"$kstreamName.processRotateLeft($srcExpr, $expr, 1)"
+      case ProcessCustom(name, args) =>
+        val namespace = name.init.mkString(".")
+        val procClass = namespace +
+          (if (namespace.nonEmpty) "." else "") +
+          type2class(name.last)
+        val procName = s"_process_${idToStr(varSrc)}"
+        if (!translator.inSubIOWriteBackHandler) {
+          out.puts(s"$procClass $procName = new $procClass(${args.map(expression).mkString(", ")});")
+        }
+        s"$procName.encode($srcExpr)"
+    }
+    handleAssignment(varDest, expr, rep, false, dataType, dataType)
+  }
+
+  override def attrUnprocessPrepareBeforeSubIOHandler(proc: ProcessExpr, varSrc: Identifier): Unit = {
+    proc match {
+      case ProcessXor(xorValue) =>
+        val dataType = translator.detectType(xorValue)
+        out.puts(s"final ${kaitaiType2JavaType(dataType)} _processXorArg = ${expression(xorValue)};")
+      case ProcessRotate(_, rotValue) =>
+        val dataType = translator.detectType(rotValue)
+        out.puts(s"final ${kaitaiType2JavaType(dataType)} _processRotateArg = ${expression(rotValue)};")
+      case ProcessZlib => // no process arguments
+      case ProcessCustom(name, args) =>
+        val namespace = name.init.mkString(".")
+        val procClass = namespace +
+          (if (namespace.nonEmpty) "." else "") +
+          type2class(name.last)
+        val procName = s"_process_${idToStr(varSrc)}"
+        out.puts(s"final $procClass $procName = new $procClass(${args.map(expression).mkString(", ")});")
+    }
   }
 
   override def allocateIO(varName: Identifier, rep: RepeatSpec): String = {
-    val javaName = idToStr(varName)
-
-    val ioName = s"_io_$javaName"
+    val ioName = idToStr(IoStorageIdentifier(varName))
 
     val args = rep match {
       case RepeatUntil(_) => translator.doName(Identifier.ITERATOR2)
@@ -283,10 +433,56 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     ioName
   }
 
+  override def allocateIOFixed(varName: Identifier, size: String): String = {
+    val ioName = idToStr(IoStorageIdentifier(varName))
+
+    out.puts(s"final $kstreamName $ioName = new ByteBufferKaitaiStream($size);")
+    ioName
+  }
+
+  override def exprIORemainingSize(io: String): String =
+    s"$io.size() - $io.pos()"
+
+  override def allocateIOGrowing(varName: Identifier): String =
+    allocateIOFixed(varName, "100000") // FIXME to use real growing buffer
+
+  override def subIOWriteBackHeader(subIO: String, rep: RepeatSpec, process: Option[ProcessExpr]): String = {
+    val parentIoName = "parent"
+    out.puts(s"final ${type2class(typeProvider.nowClass.name.last)} _this = this;")
+    rep match {
+      case NoRepeat =>
+        // do nothing
+      case _ =>
+        out.puts("final int _i = i;")
+    }
+    out.puts(s"$subIO.setWriteBackHandler(new $kstreamName.WriteBackHandler(_pos2) {")
+    out.inc
+    out.puts("@Override")
+    out.puts(s"protected void write($kstreamName $parentIoName) {")
+    out.inc
+
+    translator.inSubIOWriteBackHandler = true
+
+    parentIoName
+  }
+
+  override def subIOWriteBackFooter(subIO: String): Unit = {
+    translator.inSubIOWriteBackHandler = false
+
+    out.dec
+    out.puts("}")
+    out.dec
+    out.puts("});")
+  }
+
+  override def addChildIO(io: String, childIO: String): Unit =
+    out.puts(s"$io.addChildStream($childIO);")
+
   def getRawIdExpr(varName: Identifier, rep: RepeatSpec): String = {
-    val memberName = idToStr(varName)
+    val memberName = privateMemberName(varName)
     rep match {
       case NoRepeat => memberName
+      case RepeatExpr(_) => s"$memberName.get(i)"
       case _ => s"$memberName.get($memberName.size() - 1)"
     }
   }
@@ -299,21 +495,21 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def pushPos(io: String): Unit =
     out.puts(s"long _pos = $io.pos();")
 
+  override def pushPosForSubIOWriteBackHandler(io: String): Unit =
+    out.puts(s"long _pos2 = $io.pos();")
+
   override def seek(io: String, pos: Ast.expr): Unit =
     out.puts(s"$io.seek(${expression(pos)});")
+
+  override def seekRelative(io: String, relPos: String): Unit =
+    out.puts(s"$io.seek($io.pos() + ($relPos));")
 
   override def popPos(io: String): Unit =
     out.puts(s"$io.seek(_pos);")
 
-  override def alignToByte(io: String): Unit =
-    out.puts(s"$io.alignToByte();")
-
   override def attrDebugStart(attrId: Identifier, attrType: DataType, ios: Option[String], rep: RepeatSpec): Unit = {
     ios.foreach { (io) =>
-      val name = attrId match {
-        case _: RawIdentifier | _: SpecialIdentifier => return
-        case _ => idToStr(attrId)
-      }
+      val name = idToStr(attrId)
       rep match {
         case NoRepeat =>
           out.puts("_attrStart.put(\"" + name + "\", " + io + ".pos());")
@@ -323,11 +519,12 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     }
   }
 
+  override def attrDebugArrInit(attrName: Identifier, attrType: DataType): Unit = {
+    // no _debug[$name]['arr'] initialization needed in Java
+  }
+
   override def attrDebugEnd(attrId: Identifier, attrType: DataType, io: String, rep: RepeatSpec): Unit = {
-    val name = attrId match {
-      case _: RawIdentifier | _: SpecialIdentifier => return
-      case _ => idToStr(attrId)
-    }
+    val name = idToStr(attrId)
     rep match {
       case NoRepeat =>
         out.puts("_attrEnd.put(\"" + name + "\", " + io + ".pos());")
@@ -337,9 +534,11 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   }
 
   def getOrCreatePosList(listName: String, varName: String, io: String): Unit = {
+    importList.add("java.util.List")
+    importList.add("java.util.ArrayList")
     out.puts("{")
     out.inc
-    out.puts("ArrayList<Integer> _posList = " + listName + ".get(\"" + varName + "\");")
+    out.puts("List<Integer> _posList = " + listName + ".get(\"" + varName + "\");")
     out.puts("if (_posList == null) {")
     out.inc
     out.puts("_posList = new ArrayList<Integer>();")
@@ -356,19 +555,17 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.inc
   }
 
-  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw): Unit = {
-    if (needRaw.level >= 1)
-      out.puts(s"${privateMemberName(RawIdentifier(id))} = new ArrayList<byte[]>();")
-    if (needRaw.level >= 2)
-      out.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = new ArrayList<byte[]>();")
-    out.puts(s"${privateMemberName(id)} = new ${kaitaiType2JavaType(ArrayTypeInStream(dataType))}();")
+  override def condRepeatInitAttr(id: Identifier, dataType: DataType): Unit = {
+    importList.add("java.util.ArrayList")
+    out.puts(s"${privateMemberName(id)} = new ArrayList<${kaitaiType2JavaTypeBoxed(dataType)}>();")
+  }
+
+  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType): Unit = {
     out.puts("{")
     out.inc
     out.puts("int i = 0;")
     out.puts(s"while (!$io.isEof()) {")
     out.inc
-
-    importList.add("java.util.ArrayList")
   }
 
   override def handleAssignmentRepeatEos(id: Identifier, expr: String): Unit = {
@@ -383,36 +580,27 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts("}")
   }
 
-  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, repeatExpr: expr): Unit = {
-    if (needRaw.level >= 1)
-      out.puts(s"${privateMemberName(RawIdentifier(id))} = new ArrayList<byte[]>(((Number) (${expression(repeatExpr)})).intValue());")
-    if (needRaw.level >= 2)
-      out.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = new ArrayList<byte[]>(((Number) (${expression(repeatExpr)})).intValue());")
-    out.puts(s"${idToStr(id)} = new ${kaitaiType2JavaType(ArrayTypeInStream(dataType))}(((Number) (${expression(repeatExpr)})).intValue());")
+  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, repeatExpr: expr): Unit = {
     out.puts(s"for (int i = 0; i < ${expression(repeatExpr)}; i++) {")
     out.inc
-
-    importList.add("java.util.ArrayList")
   }
 
-  override def handleAssignmentRepeatExpr(id: Identifier, expr: String): Unit = {
-    out.puts(s"${privateMemberName(id)}.add($expr);")
+  // used for all repetitions in _check()
+  override def condRepeatCommonHeader(id: Identifier, io: String, dataType: DataType): Unit = {
+    out.puts(s"for (int i = 0; i < ${privateMemberName(id)}.size(); i++) {")
+    out.inc
   }
 
-  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, untilExpr: expr): Unit = {
-    if (needRaw.level >= 1)
-      out.puts(s"${privateMemberName(RawIdentifier(id))} = new ArrayList<byte[]>();")
-    if (needRaw.level >= 2)
-      out.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = new ArrayList<byte[]>();")
-    out.puts(s"${privateMemberName(id)} = new ${kaitaiType2JavaType(ArrayTypeInStream(dataType))}();")
+  override def handleAssignmentRepeatExpr(id: Identifier, expr: String): Unit =
+    handleAssignmentRepeatEos(id, expr)
+
+  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, untilExpr: expr): Unit = {
     out.puts("{")
     out.inc
-    out.puts(s"${kaitaiType2JavaType(dataType)} ${translator.doName("_")};")
+    out.puts(s"${kaitaiType2JavaType(dataType)} ${translator.doName(Identifier.ITERATOR)};")
     out.puts("int i = 0;")
     out.puts("do {")
     out.inc
-
-    importList.add("java.util.ArrayList")
   }
 
   override def handleAssignmentRepeatUntil(id: Identifier, expr: String, isRaw: Boolean): Unit = {
@@ -425,7 +613,7 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts(s"${privateMemberName(id)}.add($tempVar);")
   }
 
-  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, untilExpr: expr): Unit = {
+  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, untilExpr: expr): Unit = {
     typeProvider._currentIteratorType = Some(dataType)
     out.puts("i++;")
     out.dec
@@ -446,8 +634,8 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   }
   override def blockScopeFooter: Unit = universalFooter
 
-  override def parseExpr(dataType: DataType, assignType: DataType, io: String, defEndian: Option[FixedEndian]): String = {
-    val expr = dataType match {
+  override def parseExpr(dataType: DataType, io: String, defEndian: Option[FixedEndian]): String = {
+    dataType match {
       case t: ReadableType =>
         s"$io.read${Utils.capitalize(t.apiCall(defEndian))}()"
       case blt: BytesLimitType =>
@@ -455,13 +643,18 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       case _: BytesEosType =>
         s"$io.readBytesFull()"
       case BytesTerminatedType(terminator, include, consume, eosError, _) =>
-        s"$io.readBytesTerm((byte) $terminator, $include, $consume, $eosError)"
+        if (terminator.length == 1) {
+          val term = terminator.head & 0xff
+          s"$io.readBytesTerm((byte) $term, $include, $consume, $eosError)"
+        } else {
+          s"$io.readBytesTermMulti(${translator.doByteArrayLiteral(terminator)}, $include, $consume, $eosError)"
+        }
       case BitsType1(bitEndian) =>
         s"$io.readBitsInt${Utils.upperCamelCase(bitEndian.toSuffix)}(1) != 0"
       case BitsType(width: Int, bitEndian) =>
         s"$io.readBitsInt${Utils.upperCamelCase(bitEndian.toSuffix)}($width)"
       case t: UserType =>
-        val addArgs = if (t.isOpaque) {
+        val addArgs = if (t.isExternal(typeProvider.nowClass)) {
           ""
         } else {
           val parent = t.forcedParent match {
@@ -478,33 +671,64 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
         val addParams = Utils.join(t.args.map((a) => translator.translate(a)), ", ", ", ", "")
         s"new ${types2class(t.name)}($io$addArgs$addParams)"
     }
+  }
 
-    if (assignType != dataType) {
-      s"(${kaitaiType2JavaType(assignType)}) ($expr)"
+  override def createSubstreamFixedSize(id: Identifier, blt: BytesLimitType, io: String, rep: RepeatSpec, defEndian: Option[FixedEndian]): String = {
+    val ioName = idToStr(IoStorageIdentifier(id))
+    handleAssignmentTempVar(KaitaiStreamType, ioName, s"$io.substream(${translator.translate(blt.size)})")
+    ioName
+  }
+
+  override def extraRawAttrForUserTypeFromBytes(id: Identifier, ut: UserTypeFromBytes, condSpec: ConditionalSpec): List[AttrSpec] = {
+    if (config.zeroCopySubstream) {
+      ut.bytes match {
+        case BytesLimitType(sizeExpr, None, _, None, None) =>
+          // substream will be used, no need for store raws
+          List()
+        case _ =>
+          // buffered implementation will be used, fall back to raw storage
+          super.extraRawAttrForUserTypeFromBytes(id, ut, condSpec)
+      }
     } else {
-      expr
+      // zero-copy streams disabled, fall back to raw storage
+      super.extraRawAttrForUserTypeFromBytes(id, ut, condSpec)
     }
   }
 
-  override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Int], include: Boolean) = {
+  override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Seq[Byte]], include: Boolean) = {
     val expr1 = padRight match {
-      case Some(padByte) => s"$kstreamName.bytesStripRight($expr0, (byte) $padByte)"
-      case None => expr0
+      case Some(padByte) if terminator.map(term => padByte != (term.last & 0xff)).getOrElse(true) =>
+        s"$kstreamName.bytesStripRight($expr0, (byte) $padByte)"
+      case _ => expr0
     }
     val expr2 = terminator match {
-      case Some(term) => s"$kstreamName.bytesTerminate($expr1, (byte) $term, $include)"
+      case Some(term) =>
+        if (term.length == 1) {
+          val t = term.head & 0xff
+          s"$kstreamName.bytesTerminate($expr1, (byte) $t, $include)"
+        } else {
+          s"$kstreamName.bytesTerminateMulti($expr1, ${translator.doByteArrayLiteral(term)}, $include)"
+        }
       case None => expr1
     }
     expr2
   }
 
   override def userTypeDebugRead(id: String, dataType: DataType, assignType: DataType): Unit = {
-    val expr = if (assignType != dataType) {
-      s"((${kaitaiType2JavaType(dataType)}) ($id))"
-    } else {
-      id
-    }
+    val expr = castIfNeeded(id, assignType.asCombined, dataType)
     out.puts(s"$expr._read();")
+  }
+
+  override def tryFinally(tryBlock: () => Unit, finallyBlock: () => Unit): Unit = {
+    out.puts("try {")
+    out.inc
+    tryBlock()
+    out.dec
+    out.puts("} finally {")
+    out.inc
+    finallyBlock()
+    out.dec
+    out.puts("}")
   }
 
   override def switchCasesRender[T](
@@ -519,37 +743,56 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     // doing this workaround for enums.
 
     val onType = typeProvider._currentSwitchType.get
-    val isNullable = onType match {
-      case _: EnumType => true
-      case _ => false
-    }
+    onType match {
+      case EnumType(name, owner, _) => {
+        val enumClass = types2class(owner :+ name)
+        // Open a block scope to isolate the "on" variable
+        out.puts("{")
+        out.inc
+        out.puts(s"final ${enum2iface(name, owner)} on = ${expression(on)};")
+        out.puts(s"if (on instanceof $enumClass) {")
+        out.inc
+        out.puts(s"switch (($enumClass)on) {")
+        out.inc
 
-    if (isNullable) {
-      val nameSwitchStr = expression(NAME_SWITCH_ON)
-      out.puts("{")
-      out.inc
-      out.puts(s"${kaitaiType2JavaType(onType)} $nameSwitchStr = ${expression(on)};")
-      out.puts(s"if ($nameSwitchStr != null) {")
-      out.inc
+        // Pass 1: only normal case clauses
+        cases.foreach { case (condition, result) =>
+          condition match {
+            case SwitchType.ELSE_CONST =>
+              // skip for now
+            case _ =>
+              switchCaseStart(condition)
+              normalCaseProc(result)
+              switchCaseEnd()
+          }
+        }
 
-      super.switchCasesRender(id, on, cases, normalCaseProc, elseCaseProc)
-
-      out.dec
-      cases.get(SwitchType.ELSE_CONST) match {
-        case Some(result) =>
-          out.puts("} else {")
-          out.inc
+        // Pass 2: else clause, if it is there
+        cases.get(SwitchType.ELSE_CONST).foreach { (result) =>
+          switchElseStart()
           elseCaseProc(result)
-          out.dec
-          out.puts("}")
-        case None =>
-          out.puts("}")
-      }
+          switchElseEnd()
+        }
 
-      out.dec
-      out.puts("}")
-    } else {
-      super.switchCasesRender(id, on, cases, normalCaseProc, elseCaseProc)
+        out.dec
+        out.puts("}") // switch
+        out.dec
+        cases.get(SwitchType.ELSE_CONST) match {
+          case Some(result) =>
+            out.puts("} else {")
+            out.inc
+            elseCaseProc(result)
+            out.dec
+            out.puts("}")
+          case None =>
+            out.puts("}")
+        }
+
+        // Close the block scope to isolate the "on" variable
+        out.dec
+        out.puts("}")
+      }
+      case _ => super.switchCasesRender(id, on, cases, normalCaseProc, elseCaseProc)
     }
   }
 
@@ -648,6 +891,23 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts(s"private ${kaitaiType2JavaTypeBoxed(attrType)} ${idToStr(attrName)};")
   }
 
+  override def instanceWriteFlagDeclaration(attrName: InstanceIdentifier): Unit = {
+    out.puts(s"private boolean _shouldWrite${idToSetterStr(attrName)} = false;")
+    out.puts(s"private boolean _enabled${idToSetterStr(attrName)} = true;")
+  }
+
+  override def instanceSetWriteFlag(instName: InstanceIdentifier): Unit = {
+    out.puts(s"_shouldWrite${idToSetterStr(instName)} = _enabled${idToSetterStr(instName)};")
+  }
+
+  override def instanceClearWriteFlag(instName: InstanceIdentifier): Unit = {
+    out.puts(s"_shouldWrite${idToSetterStr(instName)} = false;")
+  }
+
+  override def instanceEnabledSetter(instName: InstanceIdentifier): Unit = {
+    out.puts(s"public void set${idToSetterStr(instName)}_Enabled(boolean _v) { _dirty = true; _enabled${idToSetterStr(instName)} = _v; }")
+  }
+
   override def instanceHeader(className: String, instName: InstanceIdentifier, dataType: DataType, isNullable: Boolean): Unit = {
     out.puts(s"public ${kaitaiType2JavaTypeBoxed(dataType)} ${idToStr(instName)}() {")
     out.inc
@@ -656,11 +916,33 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def instanceCheckCacheAndReturn(instName: InstanceIdentifier, dataType: DataType): Unit = {
     out.puts(s"if (${privateMemberName(instName)} != null)")
     out.inc
-    instanceReturn(instName, dataType)
+    instanceReturn(instName, dataType, false)
     out.dec
   }
 
-  override def instanceReturn(instName: InstanceIdentifier, attrType: DataType): Unit = {
+  override def instanceCheckWriteFlagAndWrite(instName: InstanceIdentifier): Unit = {
+    out.puts(s"if (_shouldWrite${idToSetterStr(instName)})")
+    out.inc
+    out.puts(s"_write${idToSetterStr(instName)}();")
+    out.dec
+  }
+
+  override def instanceReturnNullIfDisabled(instName: InstanceIdentifier): Unit = {
+    out.puts(s"if (!_enabled${idToSetterStr(instName)})")
+    out.inc
+    out.puts("return null;")
+    out.dec
+  }
+
+  override def instanceHasValueIfHeader(instName: InstanceIdentifier): Unit = {
+    out.puts(s"if (${privateMemberName(instName)} != null) {")
+    out.inc
+  }
+
+  override def instanceHasValueIfFooter(): Unit =
+    condIfFooter
+
+  override def instanceReturn(instName: InstanceIdentifier, attrType: DataType, isNullable: Boolean): Unit = {
     out.puts(s"return ${privateMemberName(instName)};")
   }
 
@@ -668,24 +950,62 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     val primType = kaitaiType2JavaTypePrim(dataType)
     val boxedType = kaitaiType2JavaTypeBoxed(dataType)
 
-    if (primType != boxedType) {
-      // Special trick to achieve both implicit type conversion + boxing.
-      // Unfortunately, Java can't do both in one assignment, i.e. this would fail:
+    if (dataType.isInstanceOf[NumericType]) {
+      // Special trick to achieve both type conversion + boxing.
+      // Unfortunately, Java can't do both by itself, i.e. this would fail:
       //
       // Double c = 1.0f + 1;
 
-      out.puts(s"$primType _tmp = ($primType) (${expression(value)});")
-      out.puts(s"${privateMemberName(instName)} = _tmp;")
+      out.puts(s"${privateMemberName(instName)} = ${translator.doCast(value, dataType)};")
     } else {
       out.puts(s"${privateMemberName(instName)} = ${expression(value)};")
     }
   }
 
-  override def enumDeclaration(curClass: String, enumName: String, enumColl: Seq[(Long, String)]): Unit = {
-    val enumClass = type2class(enumName)
+  override def instanceInvalidate(instName: InstanceIdentifier): Unit = {
+    out.puts(s"public void _invalidate${idToSetterStr(instName)}() { ${privateMemberName(instName)} = null; }")
+  }
 
+  override def enumDeclaration(curClass: String, enumName: String, enumColl: Seq[(BigInt, String)]): Unit = {
+    val enumClass = type2class(enumName)
+    val enumIface = enum2iface(enumName)
+
+    // Enums are always contained in some other class so we can generate two public items
+
+    // public interface I<enum> extends IKaitaiEnum { ... }
     out.puts
-    out.puts(s"public enum $enumClass {")
+    out.puts(s"public interface $enumIface extends IKaitaiEnum {")
+    out.inc
+    out.puts(s"public static final class Unknown extends IKaitaiEnum.Unknown implements $enumIface {")
+    out.inc
+    out.puts("Unknown(long id) { super(id); }")
+    out.puts
+    out.puts("@Override");
+    out.puts(s"""public String toString() { return "$enumClass(" + this.id + ")"; }""");
+    out.puts
+    out.puts("@Override");
+    out.puts("public int hashCode() {")
+    out.inc
+    // Use the hashCode implementation that is generated by Eclipse and VS Code Java plugin.
+    // It uses the prime number 31, and this is how Arrays.hashCode() is implemented.
+    out.puts(s"""final int result = 31 + "$enumClass".hashCode();""")
+    out.puts("return 31 * result + Long.hashCode(this.id);")
+    out.dec
+    out.puts("}");
+    out.puts
+    out.puts("@Override");
+    out.puts("public boolean equals(Object other) {");
+    out.inc
+    out.puts(s"return other instanceof $enumIface.Unknown && this.id == (($enumIface.Unknown)other).id;")
+    out.dec
+    out.puts("}");
+    out.dec
+    out.puts("}") // close class
+    out.dec
+    out.puts("}") // close interface
+
+    // public enum <enum> implements I<enum> { ... }
+    out.puts(s"public enum $enumClass implements $enumIface {")
     out.inc
 
     if (enumColl.size > 1) {
@@ -700,23 +1020,44 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
     out.puts
     out.puts("private final long id;")
-    out.puts(s"$enumClass(long id) { this.id = id; }")
-    out.puts("public long id() { return id; }")
-    out.puts(s"private static final Map<Long, $enumClass> byId = new HashMap<Long, $enumClass>(${enumColl.size});")
+    out.puts(s"private static final HashMap<Long, $enumClass> variants = new HashMap<>(${enumColl.size});")
     out.puts("static {")
     out.inc
-    out.puts(s"for ($enumClass e : $enumClass.values())")
+    out.puts(s"for ($enumClass e : values()) {")
     out.inc
-    out.puts(s"byId.put(e.id(), e);")
+    out.puts("variants.put(e.id, e);")
     out.dec
+    out.puts("}") // for
     out.dec
-    out.puts("}")
-    out.puts(s"public static $enumClass byId(long id) { return byId.get(id); }")
+    out.puts("}") // static initializer
+    out.puts
+    out.puts(s"public static $enumIface byId(final long id) {")
+    out.inc
+    out.puts(s"final $enumClass entry = variants.get(id);")
+    out.puts("if (entry != null)")
+    out.inc
+    out.puts("return entry;")
     out.dec
-    out.puts("}")
+    out.puts(s"return new $enumIface.Unknown(id);")
+    out.dec
+    out.puts("}") // byId(...)
+    out.puts
+    out.puts(s"private $enumClass(long id) { this.id = id; }")
+    out.puts
+    out.puts("@Override")
+    out.puts("public long id() { return id; }")
+    out.dec
+    out.puts("}") // enum
 
-    importList.add("java.util.Map")
     importList.add("java.util.HashMap")
+    importList.add("io.kaitai.struct.IKaitaiEnum")
+  }
+
+  override def internalEnumIntType(basedOn: IntType): DataType = {
+    basedOn match {
+      case IntMultiType(signed, _, endian) => IntMultiType(signed, Width8, endian)
+      case _ => IntMultiType(true, Width8, None)
+    }
   }
 
   override def debugClassSequence(seq: List[AttrSpec]) = {
@@ -724,40 +1065,209 @@ class JavaCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts(s"public static String[] _seqFields = new String[] { $seqStr };")
   }
 
+  override def classToString(toStringExpr: Ast.expr): Unit = {
+    out.puts
+    out.puts("@Override")
+    out.puts("public String toString() {")
+    out.inc
+    out.puts(s"return ${translator.translate(toStringExpr)};")
+    out.dec
+    out.puts("}")
+  }
+
+  override def attrPrimitiveWrite(
+    io: String,
+    valueExpr: Ast.expr,
+    dataType: DataType,
+    defEndian: Option[FixedEndian],
+    exprTypeOpt: Option[DataType]
+  ): Unit = {
+    val exprType = exprTypeOpt.getOrElse(dataType)
+    val exprRaw = expression(valueExpr)
+    val expr = castIfNeeded(exprRaw, exprType, dataType)
+
+    val stmt = dataType match {
+      case t: ReadableType =>
+        s"$io.write${Utils.capitalize(t.apiCall(defEndian))}($expr)"
+      case BitsType1(bitEndian) =>
+        s"$io.writeBitsInt${Utils.upperCamelCase(bitEndian.toSuffix)}(1, ${translator.boolToInt(valueExpr)})"
+      case BitsType(width: Int, bitEndian) =>
+        s"$io.writeBitsInt${Utils.upperCamelCase(bitEndian.toSuffix)}($width, $expr)"
+      case _: BytesType =>
+        s"$io.writeBytes($expr)"
+    }
+    out.puts(stmt + ";")
+  }
+
+  override def attrBytesLimitWrite(io: String, expr: Ast.expr, size: String, term: Int, padRight: Int): Unit =
+    out.puts(s"$io.writeBytesLimit(${expression(expr)}, $size, (byte) $term, (byte) $padRight);")
+
+  override def attrUserTypeInstreamWrite(io: String, valueExpr: Ast.expr, dataType: DataType, exprType: DataType) = {
+    val exprRaw = expression(valueExpr)
+    val expr = castIfNeeded(exprRaw, exprType, dataType)
+    out.puts(s"$expr._write_Seq($io);")
+  }
+
+  override def exprStreamToByteArray(io: String): String =
+    s"$io.toByteArray()"
+
+  override def attrBasicCheck(checkExpr: Ast.expr, actual: Ast.expr, expected: Ast.expr, msg: String): Unit = {
+    val msgStr = expression(Ast.expr.Str(msg))
+
+    out.puts(s"if (${expression(checkExpr)})")
+    out.inc
+    out.puts(s"throw new ConsistencyError($msgStr, ${expression(expected)}, ${expression(actual)});")
+    out.dec
+
+    importList.add("io.kaitai.struct.ConsistencyError")
+  }
+
+  override def attrObjectsEqualCheck(actual: Ast.expr, expected: Ast.expr, msg: String): Unit = {
+    val msgStr = expression(Ast.expr.Str(msg))
+
+    out.puts(s"if (!Objects.equals(${expression(actual)}, ${expression(expected)}))")
+    out.inc
+    out.puts(s"throw new ConsistencyError($msgStr, ${expression(expected)}, ${expression(actual)});")
+    out.dec
+
+    importList.add("java.util.Objects")
+    importList.add("io.kaitai.struct.ConsistencyError")
+  }
+
+  override def attrParentParamCheck(actualParentExpr: Ast.expr, ut: UserType, shouldDependOnIo: Option[Boolean], msg: String): Unit = {
+    /** @note Must be kept in sync with [[JavaCompiler.parseExpr]] */
+    val (expectedParent, dependsOnIo) = ut.forcedParent match {
+      case Some(USER_TYPE_NO_PARENT) => ("null", false)
+      case Some(fp) =>
+        (expression(fp), userExprDependsOnIo(fp))
+      case None => ("this", false)
+    }
+    if (shouldDependOnIo.map(shouldDepend => dependsOnIo != shouldDepend).getOrElse(false))
+      return
+
+    val msgStr = expression(Ast.expr.Str(msg))
+
+    out.puts(s"if (!Objects.equals(${expression(actualParentExpr)}, $expectedParent))")
+    out.inc
+    out.puts(s"throw new ConsistencyError($msgStr, $expectedParent, ${expression(actualParentExpr)});")
+    out.dec
+
+    importList.add("java.util.Objects")
+    importList.add("io.kaitai.struct.ConsistencyError")
+  }
+
+  override def attrIsEofCheck(io: String, expectedIsEof: Boolean, msg: String): Unit = {
+    val msgStr = expression(Ast.expr.Str(msg))
+
+    val eofExpr = s"$io.isEof()"
+    val ifExpr = if (expectedIsEof) {
+      s"!($eofExpr)"
+    } else {
+      eofExpr
+    }
+    out.puts(s"if ($ifExpr)")
+    out.inc
+    out.puts(s"throw new ConsistencyError($msgStr, 0, ${exprIORemainingSize(io)});")
+    out.dec
+
+    importList.add("io.kaitai.struct.ConsistencyError")
+  }
+
+  override def condIfIsEofHeader(io: String, wantedIsEof: Boolean): Unit = {
+    val eofExpr = s"$io.isEof()"
+    val ifExpr = if (!wantedIsEof) {
+      s"!($eofExpr)"
+    } else {
+      eofExpr
+    }
+
+    out.puts(s"if ($ifExpr) {")
+    out.inc
+  }
+
+  override def condIfIsEofFooter: Unit = universalFooter
+
   def value2Const(s: String) = Utils.upperUnderscoreCase(s)
 
-  def idToStr(id: Identifier): String = {
+  override def idToStr(id: Identifier): String = JavaCompiler.idToStr(id)
+
+  override def publicMemberName(id: Identifier): String = idToStr(id)
+
+  def idToSetterStr(id: Identifier): String = {
     id match {
       case SpecialIdentifier(name) => name
-      case NamedIdentifier(name) => Utils.lowerCamelCase(name)
+      case NamedIdentifier(name) => Utils.upperCamelCase(name)
       case NumberedIdentifier(idx) => s"_${NumberedIdentifier.TEMPLATE}$idx"
-      case InstanceIdentifier(name) => Utils.lowerCamelCase(name)
-      case RawIdentifier(innerId) => "_raw_" + idToStr(innerId)
+      case InstanceIdentifier(name) => Utils.upperCamelCase(name)
+      case RawIdentifier(innerId) => "_raw_" + idToSetterStr(innerId)
+      case OuterSizeIdentifier(innerId) => s"${idToSetterStr(innerId)}_OuterSize"
+      case InnerSizeIdentifier(innerId) => s"${idToSetterStr(innerId)}_InnerSize"
     }
   }
 
-  override def privateMemberName(id: Identifier): String = s"this.${idToStr(id)}"
-
-  override def publicMemberName(id: Identifier) = idToStr(id)
+  override def privateMemberName(id: Identifier): String =
+    JavaCompiler.privateMemberName(id, translator.inSubIOWriteBackHandler)
 
   override def localTemporaryName(id: Identifier): String = s"_t_${idToStr(id)}"
 
+  override def castIfNeeded(expr: String, exprType: DataType, targetType: DataType): String =
+    JavaCompiler.castIfNeeded(expr, exprType, targetType, importList, config)
+
+  def kaitaiType2JavaType(attrType: DataType): String =
+    JavaCompiler.kaitaiType2JavaType(attrType, importList, config)
+
+  def kaitaiType2JavaType(attrType: DataType, isNullable: Boolean): String =
+    JavaCompiler.kaitaiType2JavaType(attrType, isNullable, importList, config)
+
+  def kaitaiType2JavaTypePrim(attrType: DataType): String =
+    JavaCompiler.kaitaiType2JavaTypePrim(attrType, importList, config)
+
+  def kaitaiType2JavaTypeBoxed(attrType: DataType): String =
+    JavaCompiler.kaitaiType2JavaTypeBoxed(attrType, importList, config)
+
   override def ksErrorName(err: KSError): String = err match {
     case EndOfStreamError => config.java.endOfStreamErrorClass
+    case ConversionError => "NumberFormatException"
     case _ => s"KaitaiStream.${err.name}"
   }
 
   override def attrValidateExpr(
-    attrId: Identifier,
-    attrType: DataType,
+    attr: AttrLikeSpec,
     checkExpr: Ast.expr,
     err: KSError,
-    errArgs: List[Ast.expr]
+    useIo: Boolean,
+    actual: Ast.expr,
+    expected: Option[Ast.expr] = None
+  ): Unit =
+    attrValidate(attr, s"!(${translator.translate(checkExpr)})", err, useIo, actual, expected)
+
+  override def attrValidateInEnum(
+    attr: AttrLikeSpec,
+    et: EnumType,
+    valueExpr: Ast.expr,
+    err: ValidationNotInEnumError,
+    useIo: Boolean
   ): Unit = {
-    val errArgsStr = errArgs.map(translator.translate).mkString(", ")
-    out.puts(s"if (!(${translator.translate(checkExpr)})) {")
+    val enumClass = types2class(et.owner :+ et.name)
+    attrValidate(attr, s"!(${translator.translate(valueExpr)} instanceof $enumClass)", err, useIo, valueExpr, None)
+  }
+
+  private def attrValidate(
+    attr: AttrLikeSpec,
+    failCondExpr: String,
+    err: KSError,
+    useIo: Boolean,
+    actual: Ast.expr,
+    expected: Option[Ast.expr]
+  ): Unit = {
+    val errArgsStr = expected.map(expression) ++ List(
+      expression(actual),
+      if (useIo) expression(Ast.expr.InternalName(IoIdentifier)) else "null",
+      expression(Ast.expr.Str(attr.path.mkString("/", "/", "")))
+    )
+    out.puts(s"if ($failCondExpr) {")
     out.inc
-    out.puts(s"throw new ${ksErrorName(err)}($errArgsStr);")
+    out.puts(s"throw new ${ksErrorName(err)}(${errArgsStr.mkString(", ")});")
     out.dec
     out.puts("}")
   }
@@ -771,14 +1281,59 @@ object JavaCompiler extends LanguageCompilerStatic
     config: RuntimeConfig
   ): LanguageCompiler = new JavaCompiler(tp, config)
 
-  def kaitaiType2JavaType(attrType: DataType): String = kaitaiType2JavaTypePrim(attrType)
-
-  def kaitaiType2JavaType(attrType: DataType, isNullable: Boolean): String =
-    if (isNullable) {
-      kaitaiType2JavaTypeBoxed(attrType)
-    } else {
-      kaitaiType2JavaTypePrim(attrType)
+  def idToStr(id: Identifier): String =
+    id match {
+      case SpecialIdentifier(name) => name
+      case NamedIdentifier(name) => Utils.lowerCamelCase(name)
+      case NumberedIdentifier(idx) => s"_${NumberedIdentifier.TEMPLATE}$idx"
+      case InstanceIdentifier(name) => Utils.lowerCamelCase(name)
+      case RawIdentifier(innerId) => s"_raw_${idToStr(innerId)}"
+      case IoStorageIdentifier(innerId) => s"_io_${idToStr(innerId)}"
+      case OuterSizeIdentifier(innerId) => s"${idToStr(innerId)}_OuterSize"
+      case InnerSizeIdentifier(innerId) => s"${idToStr(innerId)}_InnerSize"
     }
+
+  def privateMemberName(id: Identifier, inSubIOWriteBackHandler: Boolean): String =
+    s"${if (inSubIOWriteBackHandler) "_" else ""}this.${idToStr(id)}"
+
+  def kaitaiType2JavaType(attrType: DataType, importList: ImportList, config: RuntimeConfig): String = kaitaiType2JavaTypePrim(attrType, importList, config)
+
+  def kaitaiType2JavaType(attrType: DataType, isNullable: Boolean, importList: ImportList, config: RuntimeConfig): String =
+    if (isNullable) {
+      kaitaiType2JavaTypeBoxed(attrType, importList, config)
+    } else {
+      kaitaiType2JavaTypePrim(attrType, importList, config)
+    }
+
+  def castIfNeeded(expr: String, exprType: DataType, targetTypeRaw: DataType, importList: ImportList, config: RuntimeConfig): String = {
+    val targetType = targetTypeRaw.asCombined
+    if (exprType != targetType) {
+      // In Java, upcasting can be performed implicitly, without the need for explicit conversion.
+      //
+      // It's not that important whether we detect *all* upcasting scenarios here. If we do not
+      // detect one, it only means that an unnecessary (but harmless) type cast will be generated.
+      val isUpcast =
+        (exprType, targetType) match {
+          case (_, AnyType) => true
+          case (_: UserType, KaitaiStructType | CalcKaitaiStructType(_)) => true
+          case _ => false
+        }
+      if (isUpcast) {
+        return expr
+      }
+      val castTypeId = kaitaiType2JavaTypePrim(targetType, importList, config)
+      targetType match {
+        // Handles both unboxing + downcasting at the same time if needed
+        // (solution from https://github.com/kaitai-io/kaitai_struct_compiler/pull/149)
+        //
+        // See also https://github.com/kaitai-io/kaitai_struct_compiler/pull/212#issuecomment-731149487
+        case _: NumericType => s"((Number) ($expr)).${castTypeId}Value()"
+        case _ => s"(($castTypeId) ($expr))"
+      }
+    } else {
+      expr
+    }
+  }
 
   /**
     * Determine Java data type corresponding to a KS data type. A "primitive" type (i.e. "int", "long", etc) will
@@ -787,7 +1342,7 @@ object JavaCompiler extends LanguageCompilerStatic
     * @param attrType KS data type
     * @return Java data type
     */
-  def kaitaiType2JavaTypePrim(attrType: DataType): String = {
+  def kaitaiType2JavaTypePrim(attrType: DataType, importList: ImportList, config: RuntimeConfig): String = {
     attrType match {
       case Int1Type(false) => "int"
       case IntMultiType(false, Width2, _) => "int"
@@ -813,14 +1368,14 @@ object JavaCompiler extends LanguageCompilerStatic
 
       case AnyType => "Object"
       case KaitaiStreamType | OwnedKaitaiStreamType => kstreamName
-      case KaitaiStructType | CalcKaitaiStructType => kstructName
+      case KaitaiStructType | CalcKaitaiStructType(_) => kstructNameFull(config)
 
       case t: UserType => types2class(t.name)
-      case EnumType(name, _) => types2class(name)
+      case EnumType(name, owner, _) => enum2iface(name, owner)
 
-      case ArrayTypeInStream(_) | CalcArrayType(_) => kaitaiType2JavaTypeBoxed(attrType)
+      case _: ArrayType => kaitaiType2JavaTypeBoxed(attrType, importList, config)
 
-      case st: SwitchType => kaitaiType2JavaTypePrim(st.combinedType)
+      case st: SwitchType => kaitaiType2JavaTypePrim(st.combinedType, importList, config)
     }
   }
 
@@ -831,7 +1386,7 @@ object JavaCompiler extends LanguageCompilerStatic
     * @param attrType KS data type
     * @return Java data type
     */
-  def kaitaiType2JavaTypeBoxed(attrType: DataType): String = {
+  def kaitaiType2JavaTypeBoxed(attrType: DataType, importList: ImportList, config: RuntimeConfig): String = {
     attrType match {
       case Int1Type(false) => "Integer"
       case IntMultiType(false, Width2, _) => "Integer"
@@ -857,20 +1412,34 @@ object JavaCompiler extends LanguageCompilerStatic
 
       case AnyType => "Object"
       case KaitaiStreamType | OwnedKaitaiStreamType => kstreamName
-      case KaitaiStructType | CalcKaitaiStructType => kstructName
+      case KaitaiStructType | CalcKaitaiStructType(_) => kstructNameFull(config)
 
       case t: UserType => types2class(t.name)
-      case EnumType(name, _) => types2class(name)
+      case EnumType(name, owner, _) => enum2iface(name, owner)
 
-      case ArrayTypeInStream(inType) => s"ArrayList<${kaitaiType2JavaTypeBoxed(inType)}>"
-      case CalcArrayType(inType) => s"ArrayList<${kaitaiType2JavaTypeBoxed(inType)}>"
+      case at: ArrayType => {
+        importList.add("java.util.List")
+        s"List<${kaitaiType2JavaTypeBoxed(at.elType, importList, config)}>"
+      }
 
-      case st: SwitchType => kaitaiType2JavaTypeBoxed(st.combinedType)
+      case st: SwitchType => kaitaiType2JavaTypeBoxed(st.combinedType, importList, config)
     }
   }
 
-  def types2class(names: List[String]) = names.map(x => type2class(x)).mkString(".")
+  def types2class(names: Iterable[String]) = names.map(x => type2class(x)).mkString(".")
+
+  def enum2iface(name: String) = s"I${type2class(name)}"
+  def enum2iface(name: String, owner: List[String]): String =
+    (owner.map(type2class) :+ enum2iface(name)).mkString(".")
 
   override def kstreamName: String = "KaitaiStream"
   override def kstructName: String = "KaitaiStruct"
+
+  def kstructNameFull(config: RuntimeConfig): String = {
+    kstructName + ((config.autoRead, config.readWrite) match {
+      case (_, true) => ".ReadWrite"
+      case (false, false) => ".ReadOnly"
+      case (true, false) => ""
+    })
+  }
 }

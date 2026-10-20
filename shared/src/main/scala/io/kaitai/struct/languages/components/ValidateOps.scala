@@ -2,6 +2,7 @@ package io.kaitai.struct.languages.components
 
 import io.kaitai.struct.ClassTypeProvider
 import io.kaitai.struct.datatype._
+import io.kaitai.struct.datatype.DataType.EnumType
 import io.kaitai.struct.exprlang.Ast
 import io.kaitai.struct.format._
 import io.kaitai.struct.translators.AbstractTranslator
@@ -13,23 +14,24 @@ trait ValidateOps extends ExceptionNames {
   val translator: AbstractTranslator
   val typeProvider: ClassTypeProvider
 
-  def attrValidate(attrId: Identifier, attr: AttrLikeSpec, valid: ValidationSpec): Unit = {
+  def attrValidate(attr: AttrLikeSpec, valid: ValidationSpec, useIo: Boolean): Unit = {
+    val itemValue = Identifier.itemExpr(attr.id, attr.cond.repeat)
     valid match {
       case ValidationEq(expected) =>
-        attrValidateExprCompare(attrId, attr, Ast.cmpop.Eq, expected, ValidationNotEqualError(attr.dataTypeComposite))
+        attrValidateExprCompare(attr, Ast.cmpop.Eq, expected, ValidationNotEqualError(attr.dataType), useIo)
       case ValidationMin(min) =>
-        attrValidateExprCompare(attrId, attr, Ast.cmpop.GtE, min, ValidationLessThanError(attr.dataTypeComposite))
+        attrValidateExprCompare(attr, Ast.cmpop.GtE, min, ValidationLessThanError(attr.dataType), useIo)
       case ValidationMax(max) =>
-        attrValidateExprCompare(attrId, attr, Ast.cmpop.LtE, max, ValidationGreaterThanError(attr.dataTypeComposite))
+        attrValidateExprCompare(attr, Ast.cmpop.LtE, max, ValidationGreaterThanError(attr.dataType), useIo)
       case ValidationRange(min, max) =>
-        attrValidateExprCompare(attrId, attr, Ast.cmpop.GtE, min, ValidationLessThanError(attr.dataTypeComposite))
-        attrValidateExprCompare(attrId, attr, Ast.cmpop.LtE, max, ValidationGreaterThanError(attr.dataTypeComposite))
+        attrValidateExprCompare(attr, Ast.cmpop.GtE, min, ValidationLessThanError(attr.dataType), useIo)
+        attrValidateExprCompare(attr, Ast.cmpop.LtE, max, ValidationGreaterThanError(attr.dataType), useIo)
       case ValidationAnyOf(values) =>
         val bigOrExpr = Ast.expr.BoolOp(
           Ast.boolop.Or,
           values.map(expected =>
             Ast.expr.Compare(
-              Ast.expr.Name(attrId.toAstIdentifier),
+              itemValue,
               Ast.cmpop.Eq,
               expected
             )
@@ -37,59 +39,63 @@ trait ValidateOps extends ExceptionNames {
         )
 
         attrValidateExpr(
-          attrId,
-          attr.dataTypeComposite,
+          attr,
           checkExpr = bigOrExpr,
-          err = ValidationNotAnyOfError(attr.dataTypeComposite),
-          errArgs = List(
-            Ast.expr.Name(attrId.toAstIdentifier),
-            Ast.expr.Name(IoIdentifier.toAstIdentifier),
-            Ast.expr.Str(attr.path.mkString("/", "/", ""))
-          )
+          err = ValidationNotAnyOfError(attr.dataType),
+          useIo = useIo,
+          actual = itemValue
+        )
+      case ValidationInEnum() =>
+        attrValidateInEnum(
+          attr,
+          attr.dataType.asInstanceOf[EnumType],
+          itemValue,
+          ValidationNotInEnumError(attr.dataType),
+          useIo
         )
       case ValidationExpr(expr) =>
         blockScopeHeader
-        typeProvider._currentIteratorType = Some(attr.dataTypeComposite)
+        typeProvider._currentIteratorType = Some(attr.dataType)
         handleAssignmentTempVar(
-          attr.dataTypeComposite,
+          attr.dataType,
           translator.translate(Ast.expr.Name(Ast.identifier(Identifier.ITERATOR))),
-          translator.translate(Ast.expr.Name(attrId.toAstIdentifier))
+          translator.translate(itemValue)
         )
         attrValidateExpr(
-          attrId,
-          attr.dataTypeComposite,
+          attr,
           expr,
-          ValidationExprError(attr.dataTypeComposite),
-          List(
-            Ast.expr.Name(attrId.toAstIdentifier),
-            Ast.expr.Name(IoIdentifier.toAstIdentifier),
-            Ast.expr.Str(attr.path.mkString("/", "/", ""))
-          )
+          ValidationExprError(attr.dataType),
+          useIo,
+          itemValue
         )
         blockScopeFooter
     }
   }
 
-  def attrValidateExprCompare(attrId: Identifier, attr: AttrLikeSpec, op: Ast.cmpop, expected: Ast.expr, err: KSError): Unit = {
+  def attrValidateExprCompare(
+    attr: AttrLikeSpec,
+    op: Ast.cmpop,
+    expected: Ast.expr,
+    err: KSError,
+    useIo: Boolean
+  ): Unit = {
+    val itemValue = Identifier.itemExpr(attr.id, attr.cond.repeat)
     attrValidateExpr(
-      attrId,
-      attr.dataTypeComposite,
+      attr,
       checkExpr = Ast.expr.Compare(
-        Ast.expr.Name(attrId.toAstIdentifier),
+        itemValue,
         op,
         expected
       ),
       err = err,
-      errArgs = List(
-        expected,
-        Ast.expr.Name(attrId.toAstIdentifier),
-        Ast.expr.Name(IoIdentifier.toAstIdentifier),
-        Ast.expr.Str(attr.path.mkString("/", "/", ""))
-      )
+      useIo = useIo,
+      actual = itemValue,
+      expected = Some(expected)
     )
   }
 
-  def attrValidateExpr(attrId: Identifier, attrType: DataType, checkExpr: Ast.expr, err: KSError, errArgs: List[Ast.expr]): Unit = {}
+  def attrValidateExpr(attr: AttrLikeSpec, checkExpr: Ast.expr, err: KSError, useIo: Boolean, actual: Ast.expr, expected: Option[Ast.expr] = None): Unit = {}
+  def attrValidateInEnum(attr: AttrLikeSpec, et: EnumType, valueExpr: Ast.expr, err: ValidationNotInEnumError, useIo: Boolean): Unit = {}
   def handleAssignmentTempVar(dataType: DataType, id: String, expr: String): Unit
   def blockScopeHeader: Unit
   def blockScopeFooter: Unit

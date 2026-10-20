@@ -1,15 +1,12 @@
 import java.io.File
 import java.nio.charset.Charset
-import java.nio.file.Files
-
+import java.nio.file.{Files, StandardCopyOption}
 import com.typesafe.sbt.packager.linux.{LinuxPackageMapping, LinuxSymlink}
-import sbt.Keys._
-
-resolvers += Resolver.sonatypeRepo("public")
+import sbt.Keys.*
 
 val NAME = "kaitai-struct-compiler"
-val VERSION = "0.10-SNAPSHOT"
-val TARGET_LANGS = "C++/STL, C#, Go, Java, JavaScript, Lua, Nim, Perl, PHP, Python, Ruby"
+val VERSION = "0.12-SNAPSHOT"
+val TARGET_LANGS = "C++/STL, C#, Go, Java, JavaScript, Lua, Nim, Perl, PHP, Python, Ruby, Rust, Zig"
 val UTF8 = Charset.forName("UTF-8")
 
 lazy val root = project.in(file(".")).
@@ -19,60 +16,79 @@ lazy val root = project.in(file(".")).
     publishLocal := {}
   )
 
-lazy val compiler = crossProject.in(file(".")).
+lazy val compiler = crossProject(JSPlatform, JVMPlatform).
+  in(file(".")).
   enablePlugins(JavaAppPackaging).
   settings(
     organization := "io.kaitai",
-    version := sys.env.getOrElse("KAITAI_STRUCT_VERSION", VERSION),
+    version := {
+      sys.env.get("KAITAI_STRUCT_VERSION") match {
+        case Some(ver) =>
+          if (VERSION.endsWith("-SNAPSHOT")) {
+            if (!ver.startsWith(VERSION))
+              throw new MessageOnlyException(s"Environment variable KAITAI_STRUCT_VERSION '$ver' doesn't start with build.sbt VERSION '$VERSION'")
+          } else {
+            if (ver != VERSION)
+              throw new MessageOnlyException(s"Environment variable KAITAI_STRUCT_VERSION '$ver' is not equal to build.sbt VERSION '$VERSION'")
+          }
+          ver
+        case None =>
+          VERSION
+      }
+    },
     licenses := Seq(("GPL-3.0", url("https://opensource.org/licenses/GPL-3.0"))),
-    scalaVersion := "2.12.12",
+    scalaVersion := "2.13.18",
+    scalacOptions := Seq("-unchecked", "-deprecation"),
 
-    // Repo publish options
-    publishTo := version { (v: String) =>
-      val nexus = "https://oss.sonatype.org/"
-      if (v.trim.endsWith("SNAPSHOT"))
-        Some("snapshots" at nexus + "content/repositories/snapshots")
-      else
-        Some("releases"  at nexus + "service/local/staging/deploy/maven2")
-    }.value,
+    // new setting for the Central Portal (see https://www.scala-sbt.org/1.x/docs/Using-Sonatype.html#step+4%3A+Configure+build.sbt)
+    publishTo := {
+      val centralSnapshots = "https://central.sonatype.com/repository/maven-snapshots/"
+      if (isSnapshot.value) Some("central-snapshots" at centralSnapshots)
+      else localStaging.value
+    },
+    // Remove all additional repository other than Maven Central from POM
+    pomIncludeRepository := { _ => false },
+    publishMavenStyle := true,
     pomExtra :=
-      <url>http://kaitai.io</url>
+      <url>https://kaitai.io/</url>
       <scm>
         <connection>scm:git:git://github.com/kaitai-io/kaitai_struct_compiler.git</connection>
         <developerConnection>scm:git:ssh://github.com:kaitai-io/kaitai_struct_compiler.git</developerConnection>
-        <url>http://github.com/kaitai-io/kaitai_struct_compiler/tree/master</url>
+        <url>https://github.com/kaitai-io/kaitai_struct_compiler</url>
       </scm>
       <developers>
         <developer>
           <name>Mikhail Yakshin</name>
           <email>greycat.na.kor@gmail.com</email>
           <organization>Kaitai Project</organization>
-          <organizationUrl>http://kaitai.io</organizationUrl>
+          <organizationUrl>https://kaitai.io/</organizationUrl>
         </developer>
       </developers>
     ,
 
     generateVersion := generateVersionTask.value, // register manual sbt command
-    sourceGenerators in Compile += generateVersionTask.taskValue, // update automatically on every rebuild
+    Compile / sourceGenerators += generateVersionTask.taskValue, // update automatically on every rebuild
 
     libraryDependencies ++= Seq(
-      "com.github.scopt" %%% "scopt" % "3.6.0",
-      "com.lihaoyi" %%% "fastparse" % "1.0.0",
-      "org.yaml" % "snakeyaml" % "1.25"
+      "com.github.scopt" %%% "scopt" % "4.1.0",
+      "com.lihaoyi" %%% "fastparse" % "3.1.1",
+      "org.yaml" % "snakeyaml" % "2.0"
     )
   ).
   jvmSettings(
     name := NAME,
 
-    mainClass in Compile := Some("io.kaitai.struct.JavaMain"),
+    Compile / mainClass := Some("io.kaitai.struct.JavaMain"),
     libraryDependencies ++= Seq(
-      "org.scalatest" %% "scalatest" % "3.0.1" % "test"
+      "org.scalatest" %% "scalatest-funspec" % "3.2.15" % "test",
+      "org.scalatest" %% "scalatest-funsuite" % "3.2.15" % "test",
+      "org.scalatest" %% "scalatest-shouldmatchers" % "3.2.15" % "test",
     ),
 
-    testOptions in Test += Tests.Argument(TestFrameworks.ScalaTest, "-u", "target/test_out"),
+    Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-u", "target/test_out"),
     // o - causes test results to be written back to sbt, which usually displays it on the standard output
     // Suppress all other notification events except failures so it is easy to see only failures
-    testOptions in Test += Tests.Argument(TestFrameworks.ScalaTest, "-oNCXELOPQRM"),
+    Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oNCXELOPQRM"),
 
     // Universal: add extra files (formats repo) for distribution, removing
     // .git special files and various dirty/backup files that git normally
@@ -80,12 +96,12 @@ lazy val compiler = crossProject.in(file(".")).
     //
     // NOTE: This requires formats repo to be checked out on the level higher
     // that the compiler
-    mappings in Universal ++= NativePackagerHelper.directory("../formats").filterNot {
+    Universal / mappings ++= NativePackagerHelper.directory("../formats").filterNot {
       case (_, dst) =>
         val dstFile = new File(dst)
         val dstFileName = dstFile.getName
         dst.startsWith(s"formats${File.separator}_") ||
-          dstFileName == ".git" ||
+          dst.startsWith(s"formats${File.separator}.git") ||
           dstFileName.endsWith("~") ||
           dstFileName.endsWith("#")
     },
@@ -125,7 +141,7 @@ lazy val compiler = crossProject.in(file(".")).
 
     // Remove all "maintainer scripts", such as prerm/postrm/preinst/postinst: default
     // implementations create per-package virtual user that we won't use anyway
-    maintainerScripts in Debian := Map(),
+    Debian / maintainerScripts := Map(),
 
     // Work around new Debian defaults and sbt-native-packager defaults, which
     // build .deb packages that appear to be incompatible with older Debian/Ubuntu's
@@ -133,13 +149,13 @@ lazy val compiler = crossProject.in(file(".")).
     //
     // For more information, see
     // https://github.com/sbt/sbt-native-packager/issues/1067
-    debianNativeBuildOptions in Debian := Seq("-Zgzip", "-z3"),
+    Debian / debianNativeBuildOptions := Seq("-Zgzip", "-z3"),
 
     debianPackageDependencies := Seq("java8-runtime-headless"),
 
-    packageSummary in Linux := s"compiler to generate binary data parsers in $TARGET_LANGS",
-    packageSummary in Windows := "Kaitai Struct compiler",
-    packageDescription in Linux :=
+    Linux / packageSummary := s"compiler to generate binary data parsers in $TARGET_LANGS",
+    Windows / packageSummary := "Kaitai Struct compiler",
+    Linux / packageDescription :=
       s"""This is the reference implementation of a compiler for Kaitai Struct (.ksy)
        | files. It allows to compile them into source code in:
        | $TARGET_LANGS.
@@ -148,10 +164,10 @@ lazy val compiler = crossProject.in(file(".")).
        | language (in contrast to imperative parsing implementation written in a
        | single programming language) and allow cross-language, cross-platform data
        | formats description.""".stripMargin,
-    packageDescription in Windows := s"Compiler to translate Kaitai Struct (.ksy) files into $TARGET_LANGS source code",
+    Windows / packageDescription := s"Compiler to translate Kaitai Struct (.ksy) files into $TARGET_LANGS source code",
 
     // Fix version for Windows: Wix doesn't allow stuff like "-SNAPSHOT" to appear in the version
-    version in Windows := VERSION.replace("-SNAPSHOT", ""),
+    Windows / version := VERSION.replace("-SNAPSHOT", ""),
 
     wixProductId := "ddcf06bc-fd48-434b-93db-1e97ba8d13a7",
     wixProductUpgradeId := "63e85f5f-7680-4b3e-9bb9-dea0f70e970a",
@@ -161,8 +177,8 @@ lazy val compiler = crossProject.in(file(".")).
     rpmUrl := Some("https://kaitai.io/"),
     rpmLicense := Some("GPLv3+"),
 
-    maintainer in Windows := "Kaitai Project",
-    maintainer in Debian := "Mikhail Yakshin <greycat@kaitai.io>"
+    Windows / maintainer := "Kaitai Project",
+    Debian / maintainer := "Mikhail Yakshin <greycat@kaitai.io>"
   ).
   jsSettings(
     name := NAME + "-js",
@@ -187,7 +203,7 @@ lazy val generateVersionTask = Def.task {
                     |""".stripMargin
 
   // Update Version.scala file, if needed
-  val file = (sourceManaged in Compile).value / "version" / "Version.scala"
+  val file = (Compile / sourceManaged).value / "version" / "Version.scala"
   println(s"Version file generated: $file")
   IO.write(file, contents)
   Seq(file)
@@ -199,7 +215,7 @@ lazy val generateVersionTask = Def.task {
   */
 lazy val buildNpmJsFile = taskKey[Seq[File]]("buildNpmJsFile")
 lazy val buildNpmJsFileTask = Def.task {
-  val compiledFile = target.value / "scala-2.12" / s"${name.value}-fastopt.js"
+  val compiledFile = target.value / "scala-2.13" / s"${name.value}-fastopt.js"
   println(s"buildNpmJsFile: reading $compiledFile")
   val compiledFileContents = IO.read(compiledFile, UTF8)
 
@@ -212,17 +228,12 @@ lazy val buildNpmJsFileTask = Def.task {
        |  } else {
        |    root.KaitaiStructCompiler = factory();
        |  }
-       |}(this, function () {
-       |
-       |var exports = {};
-       |var __ScalaJSEnv = { exportsNamespace: exports };
+       |}(typeof self !== 'undefined' ? self : this, function () {
        |
        |$compiledFileContents
-       |
-       |return exports.io.kaitai.struct.MainJs;
-       |
+       |return MainJs;
        |}));
-     """.stripMargin
+       |""".stripMargin
 
   val targetFile = new File(s"js/npm/${NAME}.js")
   println(s"buildNpmJsFile: writing $targetFile with AMD exports")
@@ -236,8 +247,8 @@ lazy val buildNpmPackageTask = Def.task {
   val readMeFile = new File("js/npm/README.md")
   val packageJsonFile = new File("js/npm/package.json")
 
-  Files.copy(new File("LICENSE").toPath, licenseFile.toPath)
-  Files.copy(new File("js/README.md").toPath, readMeFile.toPath)
+  Files.copy(new File("LICENSE").toPath, licenseFile.toPath, StandardCopyOption.REPLACE_EXISTING)
+  Files.copy(new File("js/README.md").toPath, readMeFile.toPath, StandardCopyOption.REPLACE_EXISTING)
 
   val packageJsonTmpl = IO.read(new File("js/package.json"), UTF8)
   val packageJsonContents = packageJsonTmpl.replaceFirst(

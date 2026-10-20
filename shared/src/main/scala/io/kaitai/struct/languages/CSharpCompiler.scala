@@ -7,7 +7,7 @@ import io.kaitai.struct.exprlang.Ast
 import io.kaitai.struct.exprlang.Ast.expr
 import io.kaitai.struct.format._
 import io.kaitai.struct.languages.components._
-import io.kaitai.struct.translators.{CSharpTranslator, TypeDetector}
+import io.kaitai.struct.translators.CSharpTranslator
 
 class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   extends LanguageCompiler(typeProvider, config)
@@ -17,7 +17,6 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     with AllocateIOLocalVar
     with EveryReadIsExpression
     with UniversalDoc
-    with FixedContentsUsingArrayByteLiteral
     with SwitchIfOps
     with NoNeedForFullClassPath {
   import CSharpCompiler._
@@ -193,13 +192,10 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts("}")
   }
 
-  override def attrFixedContentsParse(attrName: Identifier, contents: String): Unit =
-    out.puts(s"${privateMemberName(attrName)} = $normalIO.EnsureFixedContents($contents);")
-
-  override def attrProcess(proc: ProcessExpr, varSrc: Identifier, varDest: Identifier, rep: RepeatSpec): Unit = {
+  override def attrProcess(proc: ProcessExpr, varSrc: Identifier, rep: RepeatSpec): String = {
     val srcExpr = getRawIdExpr(varSrc, rep)
 
-    val expr = proc match {
+    proc match {
       case ProcessXor(xorValue) =>
         s"$normalIO.ProcessXor($srcExpr, ${expression(xorValue)})"
       case ProcessZlib =>
@@ -217,7 +213,6 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
         out.puts(s"$procClass $procName = new $procClass(${args.map(expression).mkString(", ")});")
         s"$procName.Decode($srcExpr)"
     }
-    handleAssignment(varDest, expr, rep, false)
   }
 
   override def allocateIO(varName: Identifier, rep: RepeatSpec): String = {
@@ -256,9 +251,6 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def popPos(io: String): Unit =
     out.puts(s"$io.Seek(_pos);")
 
-  override def alignToByte(io: String): Unit =
-    out.puts(s"$io.AlignToByte();")
-
   override def instanceClear(instName: InstanceIdentifier): Unit = {
     out.puts(s"${flagForInstName(instName)} = false;")
   }
@@ -272,17 +264,15 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.inc
   }
 
-  override def condIfFooter(expr: expr): Unit = fileFooter(null)
+  override def condIfFooter: Unit = fileFooter(null)
 
-  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw): Unit = {
+  override def condRepeatInitAttr(id: Identifier, dataType: DataType): Unit = {
     importList.add("System.Collections.Generic")
 
-    if (needRaw.level >= 1)
-      out.puts(s"${privateMemberName(RawIdentifier(id))} = new List<byte[]>();")
-    if (needRaw.level >= 2)
-      out.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = new List<byte[]>();")
-
     out.puts(s"${privateMemberName(id)} = new ${kaitaiType2NativeType(ArrayTypeInStream(dataType))}();")
+  }
+
+  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType): Unit = {
     out.puts("{")
     out.inc
     out.puts("var i = 0;")
@@ -302,33 +292,18 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts("}")
   }
 
-  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, repeatExpr: expr): Unit = {
-    importList.add("System.Collections.Generic")
-
-    if (needRaw.level >= 1)
-      out.puts(s"${privateMemberName(RawIdentifier(id))} = new List<byte[]>((int) (${expression(repeatExpr)}));")
-    if (needRaw.level >= 2)
-      out.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = new List<byte[]>((int) (${expression(repeatExpr)}));")
-    out.puts(s"${privateMemberName(id)} = new ${kaitaiType2NativeType(ArrayTypeInStream(dataType))}((int) (${expression(repeatExpr)}));")
+  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, repeatExpr: expr): Unit = {
     out.puts(s"for (var i = 0; i < ${expression(repeatExpr)}; i++)")
     out.puts("{")
     out.inc
   }
 
-  override def handleAssignmentRepeatExpr(id: Identifier, expr: String): Unit = {
-    out.puts(s"${privateMemberName(id)}.Add($expr);")
-  }
+  override def handleAssignmentRepeatExpr(id: Identifier, expr: String): Unit =
+    handleAssignmentRepeatEos(id, expr)
 
   override def condRepeatExprFooter: Unit = fileFooter(null)
 
-  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, untilExpr: expr): Unit = {
-    importList.add("System.Collections.Generic")
-
-    if (needRaw.level >= 1)
-      out.puts(s"${privateMemberName(RawIdentifier(id))} = new List<byte[]>();")
-    if (needRaw.level >= 2)
-      out.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = new List<byte[]>();")
-    out.puts(s"${privateMemberName(id)} = new ${kaitaiType2NativeType(ArrayTypeInStream(dataType))}();")
+  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, untilExpr: expr): Unit = {
     out.puts("{")
     out.inc
     out.puts("var i = 0;")
@@ -347,7 +322,7 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts(s"${privateMemberName(id)}.Add($tempVar);")
   }
 
-  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, untilExpr: expr): Unit = {
+  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, untilExpr: expr): Unit = {
     typeProvider._currentIteratorType = Some(dataType)
     out.puts("i++;")
     out.dec
@@ -371,7 +346,7 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts("}")
   }
 
-  override def parseExpr(dataType: DataType, assignType: DataType, io: String, defEndian: Option[FixedEndian]): String = {
+  override def parseExpr(dataType: DataType, io: String, defEndian: Option[FixedEndian]): String = {
     dataType match {
       case t: ReadableType =>
         s"$io.Read${Utils.capitalize(t.apiCall(defEndian))}()"
@@ -380,14 +355,19 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       case _: BytesEosType =>
         s"$io.ReadBytesFull()"
       case BytesTerminatedType(terminator, include, consume, eosError, _) =>
-        s"$io.ReadBytesTerm($terminator, $include, $consume, $eosError)"
+        if (terminator.length == 1) {
+          val term = terminator.head & 0xff
+          s"$io.ReadBytesTerm($term, $include, $consume, $eosError)"
+        } else {
+          s"$io.ReadBytesTermMulti(${translator.doByteArrayLiteral(terminator)}, $include, $consume, $eosError)"
+        }
       case BitsType1(bitEndian) =>
         s"$io.ReadBitsInt${Utils.upperCamelCase(bitEndian.toSuffix)}(1) != 0"
       case BitsType(width: Int, bitEndian) =>
         s"$io.ReadBitsInt${Utils.upperCamelCase(bitEndian.toSuffix)}($width)"
       case t: UserType =>
         val addParams = Utils.join(t.args.map((a) => translator.translate(a)), "", ", ", ", ")
-        val addArgs = if (t.isOpaque) {
+        val addArgs = if (t.isExternal(typeProvider.nowClass)) {
           ""
         } else {
           val parent = t.forcedParent match {
@@ -405,25 +385,46 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     }
   }
 
-  override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Int], include: Boolean) = {
+  override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Seq[Byte]], include: Boolean) = {
     val expr1 = padRight match {
       case Some(padByte) => s"$kstreamName.BytesStripRight($expr0, $padByte)"
       case None => expr0
     }
     val expr2 = terminator match {
-      case Some(term) => s"$kstreamName.BytesTerminate($expr1, $term, $include)"
+      case Some(term) =>
+        if (term.length == 1) {
+          val t = term.head & 0xff
+          s"$kstreamName.BytesTerminate($expr1, $t, $include)"
+        } else {
+          s"$kstreamName.BytesTerminateMulti($expr1, ${translator.doByteArrayLiteral(term)}, $include)"
+        }
       case None => expr1
     }
     expr2
   }
 
   override def userTypeDebugRead(id: String, dataType: DataType, assignType: DataType): Unit = {
-    val expr = if (assignType != dataType) {
+    val expr = if (assignType.asCombined != dataType) {
       s"((${kaitaiType2NativeType(dataType)}) ($id))"
     } else {
       id
     }
     out.puts(s"$expr._read();")
+  }
+
+  override def tryFinally(tryBlock: () => Unit, finallyBlock: () => Unit): Unit = {
+    out.puts("try")
+    out.puts("{")
+    out.inc
+    tryBlock()
+    out.dec
+    out.puts("}")
+    out.puts("finally")
+    out.puts("{")
+    out.inc
+    finallyBlock()
+    out.dec
+    out.puts("}")
   }
 
   override def switchRequiresIfs(onType: DataType): Boolean = onType match {
@@ -532,11 +533,11 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def instanceCheckCacheAndReturn(instName: InstanceIdentifier, dataType: DataType): Unit = {
     out.puts(s"if (${flagForInstName(instName)})")
     out.inc
-    instanceReturn(instName, dataType)
+    instanceReturn(instName, dataType, false)
     out.dec
   }
 
-  override def instanceReturn(instName: InstanceIdentifier, attrType: DataType): Unit = {
+  override def instanceReturn(instName: InstanceIdentifier, attrType: DataType, isNullable: Boolean): Unit = {
     out.puts(s"return ${privateMemberName(instName)};")
   }
 
@@ -546,7 +547,7 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
 
   def flagForInstName(ksName: Identifier) = s"f_${idToStr(ksName)}"
 
-  override def enumDeclaration(curClass: String, enumName: String, enumColl: Seq[(Long, String)]): Unit = {
+  override def enumDeclaration(curClass: String, enumName: String, enumColl: Seq[(BigInt, String)]): Unit = {
     val enumClass = type2class(enumName)
 
     out.puts
@@ -555,24 +556,26 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.inc
 
     enumColl.foreach { case (id, label) =>
-      out.puts(s"${Utils.upperCamelCase(label)} = $id,")
+      out.puts(s"${Utils.upperCamelCase(label)} = ${translator.doIntLiteral(id)},")
     }
 
     out.dec
     out.puts("}")
   }
 
-  def idToStr(id: Identifier): String = {
-    id match {
-      case SpecialIdentifier(name) => name
-      case NamedIdentifier(name) => Utils.lowerCamelCase(name)
-      case NumberedIdentifier(idx) => s"_${NumberedIdentifier.TEMPLATE}$idx"
-      case InstanceIdentifier(name) => Utils.lowerCamelCase(name)
-      case RawIdentifier(innerId) => "_raw_" + idToStr(innerId)
-    }
+  override def classToString(toStringExpr: Ast.expr): Unit = {
+    out.puts
+    out.puts("public override string ToString()")
+    out.puts("{")
+    out.inc
+    out.puts(s"return ${translator.translate(toStringExpr)};")
+    out.dec
+    out.puts("}")
   }
 
-  override def publicMemberName(id: Identifier): String = {
+  def idToStr(id: Identifier): String = CSharpCompiler.idToStr(id)
+
+  override def publicMemberName(id: Identifier): String =
     id match {
       case SpecialIdentifier(name) => s"M${Utils.upperCamelCase(name)}"
       case NamedIdentifier(name) => Utils.upperCamelCase(name)
@@ -580,33 +583,67 @@ class CSharpCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       case InstanceIdentifier(name) => Utils.upperCamelCase(name)
       case RawIdentifier(innerId) => s"M_Raw${publicMemberName(innerId)}"
     }
-  }
 
-  override def privateMemberName(id: Identifier): String = {
-    id match {
-      case SpecialIdentifier(name) => s"m${Utils.lowerCamelCase(name)}"
-      case _ => s"_${idToStr(id)}"
-    }
-  }
+  override def privateMemberName(id: Identifier): String = CSharpCompiler.privateMemberName(id)
 
   override def localTemporaryName(id: Identifier): String = s"_t_${idToStr(id)}"
 
   override def paramName(id: Identifier): String = s"p_${idToStr(id)}"
 
+  def kaitaiType2NativeType(attrType: DataType): String =
+    CSharpCompiler.kaitaiType2NativeType(importList, attrType)
+
+  def kaitaiType2NativeTypeNullable(t: DataType, isNullable: Boolean): String =
+    CSharpCompiler.kaitaiType2NativeTypeNullable(importList, t, isNullable)
+
   override def ksErrorName(err: KSError): String = CSharpCompiler.ksErrorName(err)
 
   override def attrValidateExpr(
-    attrId: Identifier,
-    attrType: DataType,
+    attr: AttrLikeSpec,
     checkExpr: Ast.expr,
     err: KSError,
-    errArgs: List[Ast.expr]
+    useIo: Boolean,
+    actual: Ast.expr,
+    expected: Option[Ast.expr] = None
+  ): Unit =
+    attrValidate(attr, s"!(${translator.translate(checkExpr)})", err, useIo, actual, expected)
+
+  override def attrValidateInEnum(
+    attr: AttrLikeSpec,
+    et: EnumType,
+    valueExpr: Ast.expr,
+    err: ValidationNotInEnumError,
+    useIo: Boolean
   ): Unit = {
-    val errArgsStr = errArgs.map(translator.translate).mkString(", ")
-    out.puts(s"if (!(${translator.translate(checkExpr)}))")
+    // TODO: the non-generic overload `Enum.IsDefined(Type, object)` used here
+    // is supposedly slow because it uses reflection (see
+    // https://stackoverflow.com/q/13615#comment48178324_4807469). [This SO
+    // answer](https://stackoverflow.com/a/55028274) suggests to use the generic
+    // overload `Enum.IsDefined<TEnum>(TEnum)` instead, claiming that it fixes
+    // the performance issues. But it's only available since .NET 5, so we would
+    // need a command-line switch to allow the user to choose whether they need
+    // compatibility with older versions or not.
+    importList.add("System")
+    attrValidate(attr, s"!Enum.IsDefined(typeof(${kaitaiType2NativeType(et)}), ${translator.translate(valueExpr)})", err, useIo, valueExpr, None)
+  }
+
+  private def attrValidate(
+    attr: AttrLikeSpec,
+    failCondExpr: String,
+    err: KSError,
+    useIo: Boolean,
+    actual: Ast.expr,
+    expected: Option[Ast.expr]
+  ): Unit = {
+    val errArgsStr = expected.map(expression) ++ List(
+      expression(actual),
+      if (useIo) expression(Ast.expr.InternalName(IoIdentifier)) else "null",
+      expression(Ast.expr.Str(attr.path.mkString("/", "/", "")))
+    )
+    out.puts(s"if ($failCondExpr)")
     out.puts("{")
     out.inc
-    out.puts(s"throw new ${ksErrorName(err)}($errArgsStr);")
+    out.puts(s"throw new ${ksErrorName(err)}(${errArgsStr.mkString(", ")});")
     out.dec
     out.puts("}")
   }
@@ -621,13 +658,28 @@ object CSharpCompiler extends LanguageCompilerStatic
     config: RuntimeConfig
   ): LanguageCompiler = new CSharpCompiler(tp, config)
 
+  def idToStr(id: Identifier): String =
+    id match {
+      case SpecialIdentifier(name) => name
+      case NamedIdentifier(name) => Utils.lowerCamelCase(name)
+      case NumberedIdentifier(idx) => s"_${NumberedIdentifier.TEMPLATE}$idx"
+      case InstanceIdentifier(name) => Utils.lowerCamelCase(name)
+      case RawIdentifier(innerId) => s"_raw_${idToStr(innerId)}"
+    }
+
+  def privateMemberName(id: Identifier): String =
+    id match {
+      case SpecialIdentifier(name) => s"m${Utils.lowerCamelCase(name)}"
+      case _ => s"_${idToStr(id)}"
+    }
+
   /**
     * Determine .NET data type corresponding to a KS data type.
     *
     * @param attrType KS data type
     * @return .NET data type
     */
-  def kaitaiType2NativeType(attrType: DataType): String = {
+  def kaitaiType2NativeType(importList: ImportList, attrType: DataType): String = {
     attrType match {
       case Int1Type(false) => "byte"
       case IntMultiType(false, Width2, _) => "ushort"
@@ -652,20 +704,23 @@ object CSharpCompiler extends LanguageCompilerStatic
       case _: BytesType => "byte[]"
 
       case AnyType => "object"
-      case KaitaiStructType | CalcKaitaiStructType => kstructName
+      case KaitaiStructType | CalcKaitaiStructType(_) => kstructName
       case KaitaiStreamType | OwnedKaitaiStreamType => kstreamName
 
       case t: UserType => types2class(t.name)
-      case EnumType(name, _) => types2class(name)
+      case EnumType(name, owner, _) => types2class(owner :+ name)
 
-      case at: ArrayType => s"List<${kaitaiType2NativeType(at.elType)}>"
+      case at: ArrayType => {
+        importList.add("System.Collections.Generic")
+        s"List<${kaitaiType2NativeType(importList, at.elType)}>"
+      }
 
-      case st: SwitchType => kaitaiType2NativeType(st.combinedType)
+      case st: SwitchType => kaitaiType2NativeType(importList, st.combinedType)
     }
   }
 
-  def kaitaiType2NativeTypeNullable(t: DataType, isNullable: Boolean): String = {
-    val r = kaitaiType2NativeType(t)
+  def kaitaiType2NativeTypeNullable(importList: ImportList, t: DataType, isNullable: Boolean): String = {
+    val r = kaitaiType2NativeType(importList, t)
     if (isNullable) {
       t match {
         case _: NumericType | _: BooleanType => s"$r?"
@@ -685,6 +740,7 @@ object CSharpCompiler extends LanguageCompilerStatic
   override def kstreamName = "KaitaiStream"
   override def ksErrorName(err: KSError): String = err match {
     case EndOfStreamError => "EndOfStreamException"
+    case ConversionError => "System.FormatException"
     case _ => err.name
   }
 }

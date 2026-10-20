@@ -39,6 +39,8 @@ class GoClassCompiler(
     // Constructor = Read() function
     compileReadFunction(curClass)
 
+    curClass.toStringExpr.foreach(expr => lang.classToString(expr))
+
     compileInstances(curClass)
 
     compileAttrReaders(curClass.seq ++ extraAttrs)
@@ -68,17 +70,17 @@ class GoClassCompiler(
     lang.instanceHeader(className, instName, dataType, instSpec.isNullable)
     lang.instanceCheckCacheAndReturn(instName, dataType)
 
+    lang.instanceSetCalculated(instName)
     instSpec match {
       case vi: ValueInstanceSpec =>
-        lang.attrParseIfHeader(instName, vi.ifExpr)
+        lang.attrParseIfHeader(instName, vi.dataTypeComposite, vi.ifExpr)
         lang.instanceCalculate(instName, dataType, vi.value)
         lang.attrParseIfFooter(vi.ifExpr)
-      case i: ParseInstanceSpec =>
-        lang.attrParse(i, instName, endian)
+      case pi: ParseInstanceSpec =>
+        lang.attrParse(pi, instName, endian)
     }
 
-    lang.instanceSetCalculated(instName)
-    lang.instanceReturn(instName, dataType)
+    lang.instanceReturn(instName, dataType, instSpec.isNullable)
     lang.instanceFooter
   }
 

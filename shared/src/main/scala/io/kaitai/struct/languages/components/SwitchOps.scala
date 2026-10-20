@@ -1,5 +1,6 @@
 package io.kaitai.struct.languages.components
 
+import io.kaitai.struct.datatype.DataType
 import io.kaitai.struct.datatype.DataType.SwitchType
 import io.kaitai.struct.exprlang.Ast
 import io.kaitai.struct.format.Identifier
@@ -25,6 +26,17 @@ trait SwitchOps {
     * the same variable.
     */
   def switchBytesOnlyAsRaw = false
+
+  def switchTaggedUnionDeclaration(attrName: Identifier, cases: Map[Ast.expr, DataType]): Unit = {}
+
+  /**
+    * Determines whether the switch type should be implemented using a tagged
+    * union in targets that support it (at the time of writing, only Zig).
+    *
+    * @param st switch type of interest
+    * @return `true` if a tagged union should be used, `false` otherwise
+    */
+  def switchUsesTaggedUnion(st: SwitchType): Boolean = false
 
   /**
     * Generate switch cases by calling case procedures. Suitable for a wide variety of
@@ -57,9 +69,9 @@ trait SwitchOps {
     normalCaseProc: (T) => Unit,
     elseCaseProc: (T) => Unit
   ): Unit = {
-    val someNormalCases = cases.filter { case (caseExpr, _) =>
+    val someNormalCases = cases.exists { case (caseExpr, _) =>
       caseExpr != SwitchType.ELSE_CONST
-    }.size > 0
+    }
 
     if (someNormalCases) {
       switchStart(id, on)
@@ -70,7 +82,7 @@ trait SwitchOps {
       cases.foreach { case (condition, result) =>
         condition match {
           case SwitchType.ELSE_CONST =>
-          // skip for now
+            // skip for now
           case _ =>
             if (first) {
               switchCaseFirstStart(condition)

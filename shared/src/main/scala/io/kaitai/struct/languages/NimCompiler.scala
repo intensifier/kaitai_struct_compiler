@@ -6,14 +6,13 @@ import io.kaitai.struct.exprlang.Ast
 import io.kaitai.struct.format._
 import io.kaitai.struct.languages.components._
 import io.kaitai.struct.translators.NimTranslator
-import io.kaitai.struct.{ClassTypeProvider, RuntimeConfig, Utils}
+import io.kaitai.struct.{ClassTypeProvider, RuntimeConfig, Utils, ExternalType}
 
 class NimCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   extends LanguageCompiler(typeProvider, config)
     with SingleOutputFile
     with EveryReadIsExpression
     with UpperCamelCaseClasses
-    with FixedContentsUsingArrayByteLiteral
     with UniversalFooter
     with AllocateIOLocalVar
     with SwitchIfOps
@@ -45,8 +44,17 @@ class NimCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts
   }
 
-  override def opaqueClassDeclaration(classSpec: ClassSpec): Unit =
-    out.puts("import \"" + classSpec.name.head + "\"")
+  override def classToString(toStringExpr: Ast.expr): Unit = {
+    out.puts
+    out.puts(s"proc `$$`(x: ${namespaced(typeProvider.nowClass.name)}): string =")
+    out.inc
+    out.puts(s"return ${translator.translate(toStringExpr)}")
+    out.dec
+    out.puts
+  }
+
+  override def externalTypeDeclaration(extType: ExternalType): Unit =
+    importList.add(extType.name.head)
   override def innerEnums = false
   override val translator: NimTranslator = new NimTranslator(typeProvider, importList)
   override def universalFooter: Unit = {
@@ -73,13 +81,6 @@ class NimCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def ksErrorName(err: KSError): String = "KaitaiError" // TODO: maybe add more debugging info
 
   // Members declared in io.kaitai.struct.languages.components.LanguageCompiler
-  override def importFile(file: String): Unit = {
-    importList.add(file)
-  }
-  override def alignToByte(io: String): Unit = out.puts(s"alignToByte($io)")
-  override def attrFixedContentsParse(attrName: Identifier, contents: String): Unit = {
-    out.puts(s"this.${idToStr(attrName)} = $normalIO.ensureFixedContents($contents)")
-  }
   // def attrParse(attr: AttrLikeSpec, id: Identifier, defEndian: Option[Endianness]): Unit = ???
   override def attrParseHybrid(leProc: () => Unit, beProc: () => Unit): Unit = {
     out.puts("if this.isLe:")
@@ -93,12 +94,12 @@ class NimCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   }
 
   // Works but is crappily written; I want to rewrite this later XXX
-  override def attrProcess(proc: ProcessExpr, varSrc: Identifier, varDest: Identifier, rep: RepeatSpec): Unit = {
+  override def attrProcess(proc: ProcessExpr, varSrc: Identifier, rep: RepeatSpec): String = {
     val srcExpr = rep match {
       case RepeatEos | RepeatExpr(_) | RepeatUntil(_) => privateMemberName(varSrc) + "[i]"
       case NoRepeat => privateMemberName(varSrc)
     }
-    val expr = proc match {
+    proc match {
       case ProcessXor(xorValue) =>
         s"$srcExpr.processXor(${expression(xorValue)})"
       case ProcessZlib =>
@@ -116,7 +117,6 @@ class NimCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
         importList.add(namespace)
         s"$procPath($srcExpr, ${args.map(expression).mkString(", ")})"
     }
-    handleAssignment(varDest, expr, rep, false)
   }
   override def attributeDeclaration(attrName: Identifier, attrType: DataType, isNullable: Boolean): Unit = {
     out.puts(s"`${idToStr(attrName)}`*: ${ksToNim(attrType)}")
@@ -143,7 +143,13 @@ class NimCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     }
     universalFooter
   }
-  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw): Unit = {
+
+  override def condRepeatInitAttr(id: Identifier, dataType: DataType): Unit = {
+    // sequences don't have to be manually initialized in Nim - they're automatically initialized as
+    // empty sequences (see https://narimiran.github.io/nim-basics/#_result_variable)
+  }
+
+  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType): Unit = {
     out.puts("block:")
     out.inc
     out.puts("var i: int")
@@ -155,20 +161,20 @@ class NimCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.dec
     out.dec
   }
-  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, repeatExpr: Ast.expr): Unit = {
+  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, repeatExpr: Ast.expr): Unit = {
     out.puts(s"for i in 0 ..< int(${expression(repeatExpr)}):")
     out.inc
   }
-  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, repeatExpr: Ast.expr): Unit = {
+  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, untilExpr: Ast.expr): Unit = {
     out.puts("block:")
     out.inc
     out.puts("var i: int")
     out.puts("while true:")
     out.inc
   }
-  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, repeatExpr: Ast.expr): Unit = {
+  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, untilExpr: Ast.expr): Unit = {
     typeProvider._currentIteratorType = Some(dataType)
-    out.puts(s"if ${expression(repeatExpr)}:")
+    out.puts(s"if ${expression(untilExpr)}:")
     out.inc
     out.puts("break")
     out.dec
@@ -177,7 +183,7 @@ class NimCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.dec
   }
   // For this to work, we need a {.lenientCase.} pragma which disables nim's exhaustive case coverage check
-  override def enumDeclaration(curClass: List[String], enumName: String, enumColl: Seq[(Long, EnumValueSpec)]): Unit = {
+  override def enumDeclaration(curClass: List[String], enumName: String, enumColl: Seq[(BigInt, EnumValueSpec)]): Unit = {
     val enumClass = namespaced(curClass)
     out.puts(s"${enumClass}_${camelCase(enumName, true)}* = enum")
     out.inc
@@ -237,7 +243,7 @@ class NimCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     universalFooter
     out.puts
   }
-  override def instanceReturn(instName: InstanceIdentifier, attrType: DataType): Unit = {
+  override def instanceReturn(instName: InstanceIdentifier, attrType: DataType, isNullable: Boolean): Unit = {
     out.puts(s"this.${instanceFlagIdentifier(instName)} = true")
     out.puts(s"return ${privateMemberName(instName)}")
   }
@@ -337,13 +343,19 @@ class NimCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   override def publicMemberName(id: Identifier): String = idToStr(id)
 
   // Members declared in io.kaitai.struct.languages.components.EveryReadIsExpression
-  override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Int], include: Boolean): String = {
+  override def bytesPadTermExpr(expr0: String, padRight: Option[Int], terminator: Option[Seq[Byte]], include: Boolean): String = {
     val expr1 = padRight match {
       case Some(padByte) => s"$expr0.bytesStripRight($padByte)"
       case None => expr0
     }
     val expr2 = terminator match {
-      case Some(term) => s"$expr1.bytesTerminate($term, $include)"
+      case Some(term) =>
+        if (term.length == 1) {
+          val t = term.head & 0xff
+          s"$expr1.bytesTerminate($t, $include)"
+        } else {
+          s"$expr1.bytesTerminateMulti(${translator.doByteArrayLiteral(term)}, $include)"
+        }
       case None => expr1
     }
     expr2
@@ -373,8 +385,8 @@ class NimCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
     out.puts(s"${privateMemberName(id)} = $exprName")
   }
   override def handleAssignmentTempVar(dataType: DataType, id: String, expr: String): Unit = {}
-  override def parseExpr(dataType: DataType, assignType: DataType, io: String, defEndian: Option[FixedEndian]): String = {
-    val expr = dataType match {
+  override def parseExpr(dataType: DataType, io: String, defEndian: Option[FixedEndian]): String = {
+    dataType match {
       case t: ReadableType =>
         s"$io.read${Utils.capitalize(t.apiCall(defEndian))}()"
       case blt: BytesLimitType =>
@@ -382,34 +394,57 @@ class NimCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
       case _: BytesEosType =>
         s"$io.readBytesFull()"
       case BytesTerminatedType(terminator, include, consume, eosError, _) =>
-        s"$io.readBytesTerm($terminator, $include, $consume, $eosError)"
+        if (terminator.length == 1) {
+          val term = terminator.head & 0xff
+          s"$io.readBytesTerm($term, $include, $consume, $eosError)"
+        } else {
+          s"$io.readBytesTermMulti(${translator.doByteArrayLiteral(terminator)}, $include, $consume, $eosError)"
+        }
       case BitsType1(bitEndian) =>
         s"$io.readBitsInt${camelCase(bitEndian.toSuffix, true)}(1) != 0"
       case BitsType(width: Int, bitEndian) =>
         s"$io.readBitsInt${camelCase(bitEndian.toSuffix, true)}($width)"
       case t: UserType =>
-        val addArgs = {
+        val (parent, root) = if (t.isExternal(typeProvider.nowClass)) {
+          ("nil", "nil")
+        } else {
           val parent = t.forcedParent match {
             case Some(USER_TYPE_NO_PARENT) => "nil"
             case Some(fp) => translator.translate(fp)
             case None => "this"
           }
-          s", this.root, $parent"
+          (parent, "this.root")
         }
         val addParams = Utils.join(t.args.map((a) => translator.translate(a)), ", ", ", ", "")
         val concreteName = namespaced(t.classSpec match {
           case Some(cs) => cs.name
           case None => t.name
         })
-        s"${concreteName}.read($io$addArgs$addParams)"
+        // FIXME: apparently, the Nim compiler uses a different order of
+        // `$parent` and `$root` than literally every other language
+        s"${concreteName}.read($io, $root, $parent$addParams)"
     }
+  }
 
-    if (assignType != dataType) {
-      s"${ksToNim(assignType)}($expr)"
+  override def castIfNeeded(expr: String, exprType: DataType, targetType: DataType): String = {
+    val targetTypeComb = targetType.asCombined
+    if (targetTypeComb != exprType) {
+      // Copied from JavaCompiler.castIfNeeded()
+      val isUpcast =
+        (exprType, targetTypeComb) match {
+          case (_, AnyType) => true
+          case (_: UserType, KaitaiStructType | CalcKaitaiStructType(_)) => true
+          case _ => false
+        }
+      if (isUpcast) {
+        return expr
+      }
+      s"${ksToNim(targetTypeComb)}($expr)"
     } else {
       expr
     }
   }
+
   override def userTypeDebugRead(id: String, dataType: DataType, assignType: DataType): Unit = {} // TODO
 
   // Members declared in io.kaitai.struct.languages.components.SwitchOps
@@ -554,7 +589,7 @@ object NimCompiler extends LanguageCompilerStatic
       case _: StrType => "string"
       case _: BytesType => "seq[byte]"
 
-      case KaitaiStructType | CalcKaitaiStructType => "KaitaiStruct"
+      case KaitaiStructType | CalcKaitaiStructType(_) => "KaitaiStruct"
       case KaitaiStreamType | OwnedKaitaiStreamType => "KaitaiStream"
 
       case t: UserType => namespaced(t.classSpec match {

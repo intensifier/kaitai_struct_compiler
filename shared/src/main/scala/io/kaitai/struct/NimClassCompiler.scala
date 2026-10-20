@@ -21,8 +21,7 @@ class NimClassCompiler(
 
   override def compile: CompileLog.SpecSuccess = {
     lang.fileHeader(classNameFlattened(topClass))
-    compileOpaqueClasses(topClass)
-    compileImports(topClass)
+    compileExternalTypes(topClass)
 
     // if there are any enums at all maybe we can detect it and not generate this template
 //    nimlang.enumTemplate
@@ -51,17 +50,17 @@ class NimClassCompiler(
   override def compileEagerRead(seq: List[AttrSpec], endian: Option[Endianness]): Unit = {
     endian match {
       case None | Some(_: FixedEndian) =>
-        compileSeqProc(seq, None)
+        compileSeqReadProc(seq, None)
       case Some(ce: CalcEndian) =>
-        compileSeqProc(seq, Some(LittleEndian))
-        compileSeqProc(seq, Some(BigEndian))
+        compileSeqReadProc(seq, Some(LittleEndian))
+        compileSeqReadProc(seq, Some(BigEndian))
         lang.readHeader(None, false)
         compileCalcEndian(ce)
         lang.runReadCalc()
         lang.readFooter()
       case Some(InheritedEndian) =>
-        compileSeqProc(seq, Some(LittleEndian))
-        compileSeqProc(seq, Some(BigEndian))
+        compileSeqReadProc(seq, Some(LittleEndian))
+        compileSeqReadProc(seq, Some(BigEndian))
         lang.readHeader(None, false)
         lang.runReadCalc()
         lang.readFooter()
@@ -69,16 +68,11 @@ class NimClassCompiler(
   }
 
   // Must override just to add attribute docstrings
-  override def compileSeq(seq: List[AttrSpec], defEndian: Option[FixedEndian]) = {
-    var wasUnaligned = false
+  override def compileSeqRead(seq: List[AttrSpec], defEndian: Option[FixedEndian]) = {
     seq.foreach { (attr) =>
-      val nowUnaligned = isUnalignedBits(attr.dataType)
-      if (wasUnaligned && !nowUnaligned)
-        lang.alignToByte(lang.normalIO)
       if (!attr.doc.isEmpty)
         lang.attributeDoc(attr.id, attr.doc)
       lang.attrParse(attr, attr.id, defEndian)
-      wasUnaligned = nowUnaligned
     }
   }
 
@@ -96,28 +90,18 @@ class NimClassCompiler(
     compileInstanceDoc(instName, instSpec)
     lang.instanceCheckCacheAndReturn(instName, dataType)
 
+    lang.instanceSetCalculated(instName)
     instSpec match {
       case vi: ValueInstanceSpec =>
-        lang.attrParseIfHeader(instName, vi.ifExpr)
+        lang.attrParseIfHeader(instName, vi.dataTypeComposite, vi.ifExpr)
         lang.instanceCalculate(instName, dataType, vi.value)
         lang.attrParseIfFooter(vi.ifExpr)
-        lang.instanceSetCalculated(instName)
       case pi: ParseInstanceSpec =>
         lang.attrParse(pi, instName, endian)
     }
 
-    lang.instanceReturn(instName, dataType)
+    lang.instanceReturn(instName, dataType, instSpec.isNullable)
     lang.instanceFooter
-  }
-
-  def compileImports(curClass: ClassSpec): Unit = {
-    provider.nowClass = curClass
-    curClass.meta.imports.foreach(file => lang.importFile(file))
-    compileImportsRec(curClass)
-  }
-
-  def compileImportsRec(curClass: ClassSpec): Unit = {
-    curClass.types.foreach { case (_, subClass) => compileImports(subClass) }
   }
 
 //  def compileEnumsForAllTypes(curClass: ClassSpec) {
@@ -153,7 +137,7 @@ class NimClassCompiler(
   def compileTypesRec(curClass: ClassSpec): Unit = {
     curClass.types.foreach { case (_, subClass) => compileTypes(subClass) }
   }
-  
+
 //  def compileEnumConstants(curClass: ClassSpec): Unit = {
 //    provider.nowClass = curClass
 //    curClass.enums.foreach { case(_, enumColl) => {
@@ -203,4 +187,3 @@ class NimClassCompiler(
   }
 
 }
-

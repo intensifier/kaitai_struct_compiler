@@ -8,8 +8,8 @@ package io.kaitai.struct
   * @param stdStringFrontBack If true, allow use of `front()` and `back()` methods
   *                           on `std::string`. If false, come up with simulation.
   * @param useListInitializers If true, allows use of list initializers for
-  *                            `std::vector`. Otherwise, throw a fatal unimplemented
-  *                            error.
+  *                            `std::vector` and `std::set`. Otherwise, throw a fatal
+  *                            "not implemented" error.
   * @param pointers Choose which style of pointers to use.
   */
 case class CppRuntimeConfig(
@@ -45,7 +45,6 @@ case class CppRuntimeConfig(
 object CppRuntimeConfig {
   sealed trait Pointers
   case object RawPointers extends Pointers
-  case object SharedPointers extends Pointers
   case object UniqueAndRawPointers extends Pointers
 }
 
@@ -79,6 +78,12 @@ case class JavaRuntimeConfig(
   *                    "opaque" type, i.e. an external KaitaiStruct-compatible type
   *                    defined somewhere else. If false, it will be reported as
   *                    precompile error.
+  * @param zeroCopySubstream If true, code generated will handle substreams using
+  *                          zero-copy semantics if possible (with is faster and
+  *                          uses less memory, but the downside is that the stream
+  *                          must be seekable). If false, it will always use reading
+  *                          in raw byte arrays and then constructing new substream
+  *                          off the in-memory content.
   * @param cppConfig C++-specific configuration
   * @param java Java-specific configuration
   * @param goPackage Go package name
@@ -92,6 +97,8 @@ case class RuntimeConfig(
   autoRead: Boolean = true,
   readStoresPos: Boolean = false,
   opaqueTypes: Boolean = false,
+  zeroCopySubstream: Boolean = true,
+  readWrite: Boolean = false,
   cppConfig: CppRuntimeConfig = CppRuntimeConfig(),
   goPackage: String = "",
   java: JavaRuntimeConfig = JavaRuntimeConfig(),

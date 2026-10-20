@@ -1,9 +1,9 @@
 package io.kaitai.struct.format
 
-import org.scalatest.FunSpec
-import org.scalatest.Matchers._
+import org.scalatest.funspec.AnyFunSpec
+import org.scalatest.matchers.should.Matchers._
 
-class KSVersion$Test extends FunSpec {
+class KSVersion$Test extends AnyFunSpec {
   describe("KSVersion.compareTo") {
     it("returns 0 for equal versions") {
       val v1 = KSVersion.fromStr("1.2.3")
@@ -28,6 +28,18 @@ class KSVersion$Test extends FunSpec {
 
       (v1 < v2) should be(true)
       (v2 > v1) should be(true)
+    }
+
+    it("properly compares 0.1 and 0.1.0") {
+      val v1 = KSVersion.fromStr("0.1")
+      val v2 = KSVersion.fromStr("0.1.0")
+      v1.compareTo(v2) should be(0)
+      v2.compareTo(v1) should be(0)
+
+      (v1 == v2) should be(true)
+      (v2 == v1) should be(true)
+
+      (v1.hashCode()) should be(v2.hashCode())
     }
   }
 

@@ -1,13 +1,13 @@
 # Kaitai Struct: compiler
 
-![Build Status](https://img.shields.io/github/workflow/status/kaitai-io/kaitai_struct_compiler/test)
-[![Maven Central](https://img.shields.io/maven-central/v/io.kaitai/kaitai-struct-compiler_2.12)](https://search.maven.org/artifact/io.kaitai/kaitai-struct-compiler_2.12)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/kaitai-io/kaitai_struct_compiler/test.yml?branch=master)](https://github.com/kaitai-io/kaitai_struct_compiler/actions/workflows/test.yml?query=branch%3Amaster)
+[![Maven Central](https://img.shields.io/maven-central/v/io.kaitai/kaitai-struct-compiler_2.13)](https://central.sonatype.com/artifact/io.kaitai/kaitai-struct-compiler_2.13)
 
 [![npm@latest](https://img.shields.io/npm/v/kaitai-struct-compiler/latest)](https://www.npmjs.com/package/kaitai-struct-compiler/v/latest)
 [![npm@next](https://img.shields.io/npm/v/kaitai-struct-compiler/next)](https://www.npmjs.com/package/kaitai-struct-compiler/v/next)
 [![npm downloads](https://img.shields.io/npm/dm/kaitai-struct-compiler?label=npm%20downloads)](https://www.npmtrends.com/kaitai-struct-compiler)
 
-This project is an official reference compiler for [Kaitai Struct](http://kaitai.io) project.
+This project is an official reference compiler for [Kaitai Struct](https://kaitai.io/) project.
 
 Kaitai Struct is a declarative language used to describe various
 binary data structures, laid out in files or in memory: i.e. binary
@@ -25,36 +25,42 @@ access to it in a nice, easy-to-comprehend API.
 If you're looking for information on:
 
 * Kaitai Struct language itself (`.ksy` files, general usage patterns)
-  — refer to the [user guide](http://doc.kaitai.io/user_guide.html).
+  — refer to the [user guide](https://doc.kaitai.io/user_guide.html).
 * How to download and install Kaitai Struct — see the
-  [downloads](http://kaitai.io/#download).
+  [downloads](https://kaitai.io/#download).
 * How to build the compiler, run the test suite, and join the
-  development — see the [developer memo](http://doc.kaitai.io/developers.html).
+  development — see the [developer memo](https://doc.kaitai.io/developers.html).
+
+## Issues
+
+Compiler issues are tracked in the
+[kaitai-io/kaitai_struct](https://github.com/kaitai-io/kaitai_struct/issues)
+repository.
 
 ## Licensing
 
 ### Main code
 
-Kaitai Struct compiler itself is copyright (C) 2015-2021 Kaitai
+Kaitai Struct compiler itself is copyright (C) 2015-2026 Kaitai
 Project.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or (at
-your option) any later version.
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-This program is distributed in the hope that it will be useful, but
-WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-General Public License for more details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>.
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ### FastParse
 
 Portions of Kaitai Struct compiler are loosely based on
-[pythonparse](https://github.com/lihaoyi/fastparse/tree/master/pythonparse/shared/src/main/scala/pythonparse)
+[pythonparse](https://github.com/com-lihaoyi/fastparse/tree/1.0.0/pythonparse/shared/src/main/scala/pythonparse)
 from [FastParse](https://com-lihaoyi.github.io/fastparse/) and are copyright
 (c) 2014 Li Haoyi (haoyi.sg@gmail.com).
 
@@ -81,7 +87,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Portions of Kaitai Struct compiler are based on `scala/xml/Utility.scala` from [Scala XML](https://github.com/scala/scala-xml).
 
-Copyright (c) 2002-2017 EPFL
+Copyright (c) 2002-2017 EPFL\
 Copyright (c) 2011-2017 Lightbend, Inc.
 
 All rights reserved.
@@ -116,7 +122,7 @@ Kaitai Struct compiler depends on the following libraries:
 
 * [scopt](https://github.com/scopt/scopt) — MIT license
 * [fastparse](https://com-lihaoyi.github.io/fastparse/) — MIT license
-* [snakeyaml](https://bitbucket.org/asomov/snakeyaml) — Apache 2.0 license
+* [snakeyaml](https://bitbucket.org/snakeyaml/snakeyaml) — Apache 2.0 license
 
 ---
 
